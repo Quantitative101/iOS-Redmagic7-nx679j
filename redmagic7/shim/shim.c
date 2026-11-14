@@ -1,0 +1,815 @@
+/*
+ * Milestone 2: one boot answers the questions that decide the XNU port.
+ *   - CPU feature registers (16K granule, GIC sysreg interface)
+ *   - PSCI/SMCCC version and which PSCI calls the Qualcomm TZ offers
+ *   - SMP: PSCI CPU_ON for the 7 secondaries, each reports its MPIDR
+ *   - GICv3 Group 1 IRQ from the virtual timer (INTID 19 on Qualcomm)
+ * Any unexpected exception paints a blue panic screen.
+ */
+#include <stdint.h>
+#include "board.h"
+#include "console.h"
+#include "fdt.h"
+#include "mmu.h"
+#include "loader.h"
+#include "menu.h"
+#include "spmi.h"
+#include "ufs.h"
+
+#define IMEM_RESTART_REASON	0x146aa65cUL	/* qcom,msm-imem restart_reason@65c */
+#define RESTART_BOOTLOADER	0x77665500U
+#define PSHOLD			0x0c264000UL
+
+#define GICR_TYPER		0x08
+#define GICR_WAKER		0x14
+#define GICR_SGI		0x10000
+#define GICR_IGROUPR0		(GICR_SGI + 0x080)
+#define GICR_ISENABLER0		(GICR_SGI + 0x100)
+#define GICR_ICENABLER0		(GICR_SGI + 0x180)
+#define GICR_IPRIORITYR		(GICR_SGI + 0x400)
+#define GICR_ISPENDR0		(GICR_SGI + 0x200)
+#define GICR_ISACTIVER0		(GICR_SGI + 0x300)
+#define GICR_ICFGR1		(GICR_SGI + 0xc04)
+/* VTIMER_INTID, PTIMER_INTID and SGI_INTID come from board.h */
+
+#define PSCI_VERSION		0x84000000UL
+#define PSCI_CPU_SUSPEND	0xc4000001UL
+#define PSCI_CPU_OFF		0x84000002UL
+#define PSCI_CPU_ON		0xc4000003UL
+#define PSCI_MIGRATE_INFO_TYPE	0x84000006UL
+#define PSCI_SYSTEM_RESET	0x84000009UL
+#define PSCI_FEATURES		0x8400000aUL
+#define PSCI_SYSTEM_SUSPEND	0xc400000eUL
+#define PSCI_SYSTEM_RESET2	0xc4000012UL
+#define SMCCC_VERSION		0x80000000UL
+
+#define rsr(r) ({ uint64_t _v; __asm__ volatile("mrs %0, " r : "=r"(_v)); _v; })
+#define wsr(r, v) __asm__ volatile("msr " r ", %0" : : "r"((uint64_t)(v)))
+#define isb() __asm__ volatile("isb" ::: "memory")
+
+static inline uint32_t rd32(uintptr_t a) { return *(volatile uint32_t *)a; }
+static inline uint64_t rd64(uintptr_t a) { return *(volatile uint64_t *)a; }
+static inline void wr32(uintptr_t a, uint32_t v) { *(volatile uint32_t *)a = v; }
+static inline void wr8(uintptr_t a, uint8_t v) { *(volatile uint8_t *)a = v; }
+
+extern char secondary_entry[];
+
+static const char *stage;	/* set at runtime: no absolute pointers in data */
+
+/* The runtime base of this image (set in start.S). */
+uint64_t shim_base;
+
+/* The loader tells us what it is doing, so the panic names the step. */
+void shim_set_stage(const char *s)
+{
+	stage = s;
+}
+static volatile uint64_t sec_mpidr[NR_CPUS];
+static volatile uint64_t sec_probe[4];	/* CPU1 redistributor write test */
+static volatile uint32_t irq_count, irq_other, irq_last;
+static volatile int irq_src;
+
+/* ICC_SGI1R_EL1 value targeting the calling core only. */
+static uint64_t sgi_self(unsigned id)
+{
+	uint64_t m = rsr("mpidr_el1");
+	return ((m >> 16) & 0xff) << 32 |	/* Aff2 */
+	       ((m >> 8) & 0xff) << 16 |	/* Aff1 */
+	       (uint64_t)id << 24 |
+	       (1U << (m & 0xf));		/* target list: Aff0 */
+}
+
+static uint64_t smc(uint64_t fn, uint64_t a1, uint64_t a2, uint64_t a3)
+{
+	register uint64_t x0 __asm__("x0") = fn;
+	register uint64_t x1 __asm__("x1") = a1;
+	register uint64_t x2 __asm__("x2") = a2;
+	register uint64_t x3 __asm__("x3") = a3;
+	__asm__ volatile("smc #0"
+			 : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3)
+			 :
+			 : "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11",
+			   "x12", "x13", "x14", "x15", "x16", "x17", "memory");
+	return x0;
+}
+
+static uint64_t now(void)
+{
+	isb();
+	return rsr("cntpct_el0");
+}
+
+static void delay_ms(unsigned ms)
+{
+	uint64_t end = now() + rsr("cntfrq_el0") / 1000 * ms;
+	while (now() < end)
+		;
+}
+
+static void __attribute__((noreturn)) reset(unsigned after_s)
+{
+	con_skip();
+	con_str("RESET", after_s > 20 ? "in 40s" : "in 20s");
+	delay_ms(after_s * 1000);
+	wr32(IMEM_RESTART_REASON, RESTART_BOOTLOADER);
+	__asm__ volatile("dsb sy" ::: "memory");
+	smc(PSCI_SYSTEM_RESET, 0, 0, 0);
+	wr32(PSHOLD, 0);
+	for (;;)
+		__asm__ volatile("wfe");
+}
+
+/* ---- exceptions ---- */
+
+static void irq_handler(void)
+{
+	uint64_t iar = rsr("icc_iar1_el1");
+	uint32_t id = iar & 0xffffff;
+
+	if (id >= 1020 && id <= 1023)
+		return;	/* spurious */
+	irq_last = id;
+	if (id == (uint32_t)irq_src)
+		irq_count++;
+	else
+		irq_other++;
+	if (id == VTIMER_INTID)
+		wsr("cntv_tval_el0", rsr("cntfrq_el0") / 100);	/* 10 ms */
+	else if (id == PTIMER_INTID)
+		wsr("cntp_tval_el0", rsr("cntfrq_el0") / 100);
+	wsr("icc_eoir1_el1", iar);
+	isb();
+}
+
+void exc_handler(uint64_t slot, uint64_t *regs)
+{
+	if (slot == 5) {	/* IRQ from current EL, SPx */
+		irq_handler();
+		return;
+	}
+	/* Keep the console: the facts above explain what the shim was doing. */
+	for (int i = 0; i < 14; i++)
+		con_skip();
+	switch (slot & 3) {
+	case 0: con_str("PANIC", "SYNC"); break;
+	case 1: con_str("PANIC", "IRQ"); break;
+	case 2: con_str("PANIC", "FIQ"); break;
+	default: con_str("PANIC", "SERROR"); break;
+	}
+	con_hex2("SLOT", "n=", slot, "cpu=", rsr("mpidr_el1"));
+	con_str("STAGE", stage);
+	con_hex("ESR", rsr("esr_el1"));
+	con_hex("ELR", rsr("elr_el1"));
+	con_hex("FAR", rsr("far_el1"));
+	con_hex("SPSR", rsr("spsr_el1"));
+	con_hex("X0", regs[0]);
+	con_hex("X1", regs[1]);
+	con_hex("X2", regs[2]);
+	con_hex("X3", regs[3]);
+	con_hex("X29", regs[29]);
+	con_hex("X30", regs[30]);
+	/* The log viewer is read off the screen by hand: give it time. */
+#ifdef LOGVIEW
+	reset(300);
+#else
+	reset(40);
+#endif
+}
+
+/* ---- SMP ---- */
+
+static uintptr_t find_gicr(void);
+
+void secondary_main(uint64_t idx)
+{
+	sec_mpidr[idx] = rsr("mpidr_el1") | (1ULL << 63);
+	if (idx == 1) {
+		uintptr_t r = find_gicr();
+		if (r) {
+			sec_probe[0] = rd32(r + GICR_IGROUPR0);
+			wr32(r + GICR_IGROUPR0, 0xffffffff);
+			sec_probe[1] = rd32(r + GICR_IGROUPR0);
+			wr8(r + GICR_IPRIORITYR + 19, 0xa0);
+			sec_probe[2] = rd32(r + GICR_IPRIORITYR + 16);
+		}
+		sec_probe[3] = r ? 1 : 0xdead;
+	}
+	__asm__ volatile("dsb sy" ::: "memory");
+	smc(PSCI_CPU_OFF, 0, 0, 0);
+}
+
+static void __attribute__((unused)) test_smp(void)
+{
+	stage = "smp";
+	uint64_t self = rsr("mpidr_el1") & 0xffffff;
+	int64_t ret[NR_CPUS];
+
+	for (int i = 1; i < NR_CPUS; i++)
+		ret[i] = smc(PSCI_CPU_ON, (uint64_t)i << 8, (uintptr_t)secondary_entry, i);
+	delay_ms(500);
+	for (int i = 1; i < NR_CPUS; i++) {
+		char label[] = "CPU0";
+		label[3] = '0' + i;
+		if (((uint64_t)i << 8) == self)
+			con_str(label, "is boot cpu");
+		else
+			con_hex2(label, "ret=", (uint32_t)ret[i], "mpidr=",
+				 (uint32_t)sec_mpidr[i] | (sec_mpidr[i] ? 0 : 0xdead0000));
+	}
+}
+
+/* ---- GIC + timer ---- */
+
+static uintptr_t find_gicr(void)
+{
+	uint64_t aff = rsr("mpidr_el1");
+	uint32_t want = (aff & 0xffffff) | ((aff >> 8) & 0xff000000);
+
+	for (uintptr_t off = 0; off < GICR_SIZE; off += GICR_PE_SIZE) {
+		uint64_t typer = rd64(GICR_BASE + off + GICR_TYPER);
+		if ((uint32_t)(typer >> 32) == want)
+			return GICR_BASE + off;
+		if (typer & (1 << 4))	/* Last */
+			break;
+	}
+	return 0;
+}
+
+static void gicd_wait_rwp(void)
+{
+	for (int i = 0; i < 1000000 && (rd32(GICD_BASE) & (1U << 31)); i++)
+		;
+}
+
+/* Run one interrupt source for ~300 ms and report what the GIC saw. */
+static void irq_window(const char *label, uintptr_t r, int src)
+{
+	uint64_t f = rsr("cntfrq_el0");
+	uint32_t pend = 0, act = 0, isr = 0, hppi = 0x3ff, ist = 0;
+
+	irq_count = irq_other = 0;
+	irq_last = 0x3ff;
+	irq_src = src;
+	if (src == VTIMER_INTID) {
+		wsr("cntv_tval_el0", f / 100);
+		wsr("cntv_ctl_el0", 1);
+	} else if (src == PTIMER_INTID) {
+		wsr("cntp_tval_el0", f / 100);
+		wsr("cntp_ctl_el0", 1);
+	}
+	isb();
+	/* sample state with IRQs still masked, after the first period */
+	uint64_t t = now() + f / 50;
+	while (now() < t)
+		;
+	if (src == SGI_INTID)
+		wsr("icc_sgi1r_el1", sgi_self(SGI_INTID));
+	isb();
+	ist = src == PTIMER_INTID ? rsr("cntp_ctl_el0") : rsr("cntv_ctl_el0");
+	pend = rd32(r + GICR_ISPENDR0);
+	act = rd32(r + GICR_ISACTIVER0);
+	isr = rsr("isr_el1");
+	hppi = rsr("icc_hppir1_el1");
+
+	__asm__ volatile("msr daifclr, #2" ::: "memory");
+	t = now() + f * 3 / 10;
+	/* SGI: one already sent above, send 9 more 10 ms apart -> expect 10 */
+	uint64_t next = now() + f / 100;
+	for (int sent = 1; now() < t;)
+		if (src == SGI_INTID && sent < 10 && now() >= next) {
+			wsr("icc_sgi1r_el1", sgi_self(SGI_INTID));
+			isb();
+			sent++;
+			next += f / 100;
+		}
+	__asm__ volatile("msr daifset, #2" ::: "memory");
+	wsr("cntv_ctl_el0", 0);
+	wsr("cntp_ctl_el0", 0);
+	isb();
+
+	con_hex2(label, "irqs=", irq_count, "other=", irq_other);
+	con_hex2(" pre", "pend=", pend, "act=", act);
+	con_hex2(" pre", "isr=", isr, "hppi=", hppi);
+	con_hex2(" pre", "tctl=", ist, "last=", irq_last);
+}
+
+static void test_gic(void)
+{
+	stage = "gic sre";
+	uint64_t sre = rsr("icc_sre_el1");
+	if (!(sre & 1)) {
+		wsr("icc_sre_el1", sre | 1);
+		isb();
+	}
+	if (!(rsr("icc_sre_el1") & 1)) {
+		con_str("GIC", "no sysreg iface, skip");
+		return;
+	}
+
+	stage = "gic dist";
+	uint32_t dctlr = rd32(GICD_BASE);
+	/* Non-secure view (DS=0): bit0 EnableGrp1, bit1 EnableGrp1A, bit4 ARE_NS; Linux writes 0x13 */
+	wr32(GICD_BASE, dctlr | 0x13);
+	gicd_wait_rwp();
+	con_hex2("GICD", "was=", dctlr, "now=", rd32(GICD_BASE));
+
+	stage = "gic redist";
+	uintptr_t r = find_gicr();
+	if (!r) {
+		con_str("GICR", "not found");
+		return;
+	}
+	uint32_t waker = rd32(r + GICR_WAKER);
+	if (waker & 2) {
+		wr32(r + GICR_WAKER, waker & ~2U);
+		for (int i = 0; i < 100000 && (rd32(r + GICR_WAKER) & 4); i++)
+			;
+	}
+	con_hex2("GICR", "base=", r, "waker=", rd32(r + GICR_WAKER));
+
+	stage = "gic config";
+	uint32_t grp = rd32(r + GICR_IGROUPR0);
+	wr32(r + GICR_IGROUPR0, 0xffffffff);	/* NS view: secure bits are WI */
+	uint32_t en_before = rd32(r + GICR_ISENABLER0);
+	uint32_t pri_before = rd32(r + GICR_IPRIORITYR + 16);	/* INTIDs 16..19 */
+	for (int id = 0; id < 32; id++)
+		wr8(r + GICR_IPRIORITYR + id, 0xa0);
+	wr32(r + GICR_ISENABLER0, (1U << VTIMER_INTID) | (1U << PTIMER_INTID) | (1U << SGI_INTID));
+	con_hex2("ENABLE", "was=", en_before, "now=", rd32(r + GICR_ISENABLER0));
+	(void)grp;
+	(void)pri_before;
+
+	uint64_t ctlr = rsr("icc_ctlr_el1");
+	wsr("icc_ctlr_el1", ctlr & ~2ULL);	/* EOImode 0: EOIR also deactivates */
+	wsr("icc_pmr_el1", 0xf0);
+	wsr("icc_bpr1_el1", 0);
+	wsr("icc_igrpen1_el1", 1);
+	isb();
+	con_hex2("ICC", "ctlr=", ctlr, "grpen1=", rsr("icc_igrpen1_el1"));
+
+	stage = "gic vtimer";
+	irq_window("VTIMER", r, VTIMER_INTID);
+	stage = "gic sgi";
+	irq_window("SGI1", r, SGI_INTID);
+	wr32(r + GICR_ICENABLER0, 0xffffffff);
+	isb();
+}
+
+/* ---- device tree facts ---- */
+
+/*
+ * Print the facts of the live device tree in a machine readable form:
+ *
+ *   FACT memory reg0 0x100000000 0x7fc00000
+ *   FACT reg /soc/intc 0x17100000 0x10000 0x17180000 0x200000
+ *
+ * tools/boards.py parses these (parse_facts) to fill in the board table, so
+ * a new phone can be described from what the bootloader says instead of from
+ * guesswork.
+ */
+static void fact(const char *kind, const char *key, const uint64_t *v, int n)
+{
+	static const char hex[] = "0123456789abcdef";
+	char buf[192];
+	int i = 0;
+
+	for (const char *s = "FACT "; *s; s++)
+		buf[i++] = *s;
+	for (const char *s = kind; *s && i < 32; s++)
+		buf[i++] = *s;
+	buf[i++] = ' ';
+	for (const char *s = key; *s && i < 64; s++)
+		buf[i++] = *s;
+	for (int j = 0; j < n && i < 170; j++) {
+		buf[i++] = ' ';
+		buf[i++] = '0';
+		buf[i++] = 'x';
+		uint64_t x = v[j];
+		int started = 0;
+		for (int k = 60; k >= 0; k -= 4) {
+			int d = (int)((x >> k) & 0xf);
+			if (d || started || k == 0) {
+				buf[i++] = hex[d];
+				started = 1;
+			}
+		}
+	}
+	buf[i] = 0;
+	con_line(buf);
+}
+
+/* The addresses the shim uses come from the device tree the bootloader
+ * passed, not from the compile time constants: a guessed address could be a
+ * peripheral register. The constants are only a fallback for a board whose
+ * values were measured (sweet).
+ */
+static void board_from_dtb(uintptr_t dtb)
+{
+	/* A 2D array, not an array of pointers: the shim is linked at 0 and
+	 * loaded wherever ABL puts it, so any absolute address in .rodata
+	 * would be wrong (and the build refuses absolute relocations). */
+	static const char splash[][24] = {
+		"cont_splash_region", "sec_boot_screen", "splash", "",
+	};
+	char path[64];
+	uint64_t regs[8];
+
+	if (!dtb)
+		return;
+
+	/* The framebuffer the bootloader left for the panel. */
+	for (unsigned i = 0; splash[i][0]; i++) {
+		if (!fdt_find_name_depth(dtb, splash[i], path, sizeof(path), 3))
+			continue;
+		if (fdt_node_regs(dtb, path, regs, 4) <= 0)
+			continue;
+		/* Say where it is before moving the console there: the address
+		 * of the device tree is not always the one the panel shows. */
+		con_hex2("FB", "at=", (uint32_t)regs[0], "size=", (uint32_t)regs[1]);
+#if BOARD_FB_FROM_DTB
+		con_enable((uintptr_t)regs[0], FB_W, FB_H);
+#endif
+		return;
+	}
+}
+
+static void board_ufs(uintptr_t dtb)
+{
+	char path[64];
+	uint64_t regs[8];
+
+	if (!dtb)
+		return;
+	/* The UFS host, if the device tree names it. */
+	if (fdt_find_compatible(dtb, "qcom,ufshc", path, sizeof(path)) &&
+	    fdt_node_regs(dtb, path, regs, 4) > 0) {
+		ufs_set_base((uintptr_t)regs[0]);
+		con_hex2("UFS", "at=", (uint32_t)regs[0], "size=", (uint32_t)regs[1]);
+	}
+}
+
+static void __attribute__((unused)) dump_facts(uintptr_t dtb)
+{
+	/* A 2D array, not an array of pointers: see board_from_dtb(). */
+	static const char compat[][24] = {
+		"qcom,ufshc",		/* the internal UFS host */
+		"arm,gic-v3",		/* GICD and GICR */
+		"qcom,spmi",		/* the PMIC bus */
+		"qcom,geni-se-qup",	/* the QUPv3 wrapper (I2C, SPI) */
+		"qcom,dsi-display",	/* the panel */
+		"qcom,mdss",		/* the display subsystem */
+		"qcom,pmic-glink",	/* the PMIC */
+		"",
+	};
+	char path[64];
+	uint64_t regs[32];
+
+	con_str("SHIM", "board " BOARD_NAME " (" BOARD_SOC ")");
+	con_skip();
+	if (!dtb) {
+		con_str("DTB", "no device tree");
+		return;
+	}
+
+	if (fdt_find_name(dtb, "memory", path, sizeof(path))) {
+		int n = fdt_node_regs(dtb, path, regs, 16);
+		for (int i = 0; i < n; i++) {
+			char key[8] = "reg0";
+			uint64_t v[2] = { regs[i * 2], regs[i * 2 + 1] };
+			key[3] = '0' + i;
+			fact("memory", key, v, 2);
+		}
+	}
+	/* The framebuffer the bootloader left for the panel: the reserved
+	 * memory region of the splash. */
+	static const char splash[][24] = {
+		"cont_splash_region", "sec_boot_screen", "splash", "",
+	};
+	for (unsigned i = 0; splash[i][0]; i++) {
+		if (!fdt_find_name_depth(dtb, splash[i], path, sizeof(path), 3))
+			continue;
+		int n = fdt_node_regs(dtb, path, regs, 4);
+		if (n > 0)
+			fact("reg", path, regs, n * 2);
+	}
+	for (unsigned i = 0; compat[i][0]; i++) {
+		int n;
+		if (!fdt_find_compatible(dtb, compat[i], path, sizeof(path)))
+			continue;
+		n = fdt_node_regs(dtb, path, regs, 8);
+		if (n > 0)
+			fact("reg", path, regs, n * 2);
+	}
+	con_skip();
+}
+
+/*
+ * The memory map of the phone, from the live device tree, and the window the
+ * kernel gets.
+ *
+ * The device tree the bootloader passes is the truth about the RAM of this
+ * phone, so the shim uses it instead of a number baked into the image: the
+ * kernel is copied to the window chosen here and the boot arguments say so.
+ */
+struct mem_window {
+	uint64_t base, size;
+};
+
+static struct mem_window win;
+
+static void board_memory(uintptr_t dtb)
+{
+	char path[64];
+	uint64_t regs[32];		/* 16 regions, like the facts dump */
+	int n, best = -1, fb = -1;
+	uint32_t ac = 2, sc = 2;
+
+	(void)ac;
+	(void)sc;
+	/* The same call the facts dump uses: it reads the regions right. */
+	if (dtb && fdt_find_name(dtb, "memory", path, sizeof(path)))
+		n = fdt_node_regs(dtb, path, regs, 16);
+	else
+		n = 0;
+	if (n > 0) {
+		con_str("PATH", path);
+		con_hex64("R0", regs[0]);
+		con_hex64("S0", regs[1]);
+	}
+	if (n > 0) {
+		uintptr_t d;
+		uint32_t l;
+
+		/* Show what the device tree says, so it can be read. */
+		con_str("PATH", path);
+		if (fdt_node_prop(dtb, path, "reg", &d, &l))
+			con_bytes("REG", (const void *)d, 32);
+	}
+
+	for (int i = 0; i < n; i++) {
+		uint64_t base = regs[i * 2], size = regs[i * 2 + 1];
+		/*
+		 * The region that holds the splash framebuffer is the one the
+		 * kernel has to get: the early console writes to it through the
+		 * bootstrap V=P map, which only covers this window.
+		 */
+		if (FB_BASE >= base && FB_BASE < base + size)
+			fb = i;
+		/* the highest region that can host the kernel */
+		if (size >= 0x20000000UL && (best < 0 || base > regs[best * 2]))
+			best = i;
+	}
+	if (fb >= 0)
+		best = fb;
+	if (fb < 0) {
+		/*
+		 * No region holds the splash framebuffer, so the device tree
+		 * did not say what we need. The kernel has to get the window
+		 * the board table documents, or the early console cannot write
+		 * to the framebuffer and the kernel dies silently.
+		 */
+		regs[0] = BOARD_MEM_BASE;
+		regs[1] = BOARD_MEM_SIZE;
+		n = 1;
+		best = 0;
+	}
+	if (best < 0) {
+		/* no region of 512 MiB: take the largest one */
+		for (int i = 0; i < n; i++)
+			if (best < 0 || regs[i * 2 + 1] > regs[best * 2 + 1])
+				best = i;
+	}
+	if (best < 0)
+		return;
+	loader_set_regions(regs, n);
+
+	/*
+	 * The window of the board table wins: it is the one that holds the
+	 * framebuffer and starts above the firmware's memory, and it is the
+	 * one the kernel boots with. The device tree has to agree that it
+	 * is inside a memory region; if it does not, say so on the screen.
+	 */
+	if (BOARD_MEM_BASE && BOARD_MEM_SIZE) {
+		int inside = 0;
+		for (int i = 0; i < n; i++) {
+			uint64_t base = regs[i * 2], size = regs[i * 2 + 1];
+			if (BOARD_MEM_BASE >= base &&
+			    BOARD_MEM_BASE + BOARD_MEM_SIZE <= base + size)
+				inside = 1;
+		}
+		win.base = BOARD_MEM_BASE;
+		win.size = BOARD_MEM_SIZE;
+		con_str("WINDOW", inside ? "board table, inside the dt memory" :
+			"board table, NOT inside the dt memory!");
+		return;
+	}
+
+	win.base = regs[best * 2];
+	win.size = regs[best * 2 + 1];
+	/*
+	 * Inside that region, the kernel gets the biggest hole: the low
+	 * addresses of the bank belong to the firmware, and the kernel
+	 * image written over them resets the phone.
+	 */
+	if (dtb) {
+		uint64_t hb, hs;
+		if (fdt_biggest_hole(dtb, win.base, win.size, &hb, &hs) &&
+		    hs >= 0x2000000UL) {
+			win.base = hb;
+			win.size = hs;
+		}
+	}
+}
+
+
+/* ---- main ---- */
+
+static void __attribute__((unused)) psci_line(const char *label, uint64_t fn)
+{
+	con_hex2(label, "feat=", smc(PSCI_FEATURES, fn, 0, 0), 0, 0);
+}
+
+static uint64_t scratch[8192];	/* 64KB, lives in our (later cacheable) image */
+
+static uint64_t ticks_fill(uint32_t c)
+{
+	uint64_t t = now();
+	con_clear(c);
+	return now() - t;
+}
+
+static uint64_t ticks_mem(void)
+{
+	uint64_t t = now();
+	for (int pass = 0; pass < 16; pass++)
+		for (int i = 0; i < 8192; i++)
+			scratch[i] = scratch[i] * 3 + i;
+	return now() - t;
+}
+
+static uint32_t to_us(uint64_t ticks)
+{
+	return ticks * 10 / 192;	/* 19.2 MHz */
+}
+
+void shim_main(uint64_t dtb)
+{
+	struct mmu_info mi;
+
+	/* The console first, on the address the board documents: if anything
+	 * goes wrong while reading the device tree, the screen still shows
+	 * where it stopped. */
+	con_enable(FB_BASE, FB_W, FB_H);
+	con_clear(RED);		/* what is on the screen is from this run */
+	con_str("S1", "console on");
+	con_hex("DTB", dtb);
+	con_skip();
+	stage = "fdt";
+
+	/* Where the framebuffer is comes from the device tree. */
+	board_from_dtb(dtb);
+	board_ufs(dtb);
+	con_str("S2", "framebuffer");
+	con_skip();
+	/* And so does the memory map: the kernel gets the window the
+	 * bootloader reports, not the one the image was built for. */
+	stage = "mem";
+	board_memory(dtb);
+	con_str("S3", "memory");
+	con_skip();
+	if (win.size)
+		loader_set_window(win.base, win.size);
+
+	/* An xnu payload in the ramdisk means: boot it (MMU stays off). */
+	stage = "loader";
+	con_str("SHIM", BOARD_NAME " shim (" BOARD_SOC ")");
+#ifndef SMALL_SHIM
+	con_hex64("WIN", win.base);
+	con_hex64("WSZ", win.size);
+	loader_report_regions();
+	con_skip();
+#endif
+
+#ifndef SMALL_SHIM
+	/* What the bootloader says about this phone. Always print it: it is the
+	 * cheapest way to check the board table against the device. The log
+	 * viewer leaves it out: it fills the screen and the console cannot
+	 * scroll, so the log would land past the bottom. */
+#if !defined(LOGVIEW)
+	dump_facts(dtb);
+	con_skip();
+#endif
+#endif
+
+	/*
+	 * Probe the internal UFS while the MMU is still off, before the
+	 * kernel takes over: it says what the host controller is (version,
+	 * the LUN size, the partitions) and the read-only commands do not
+	 * touch the data. SHIM_NO_UFS leaves the controller alone.
+	 */
+#if !defined(SHIM_NO_UFS) && !defined(SMALL_SHIM)
+	stage = "ufs";
+	test_ufs();
+	con_skip();
+#ifdef LOGVIEW
+	/*
+	 * The log viewer: the previous boot's console log, then stop. The clear
+	 * is not cosmetic -- the bring-up dump above has already used up rows,
+	 * and the console does not scroll, so without it the log would be drawn
+	 * past the bottom of the screen. Nothing is written: this image is only
+	 * ever started with `fastboot boot`, and power+volume-down goes back to
+	 * fastboot.
+	 */
+	con_clear(0xff000000U);
+	con_str("LOGVIEW", "previous boot, last lines of the console ring");
+	log_dump();
+	for (;;) {
+		__asm__ volatile("wfi");
+	}
+#endif
+#elif defined(SHIM_NO_UFS)
+	con_str("UFS", "probe skipped (SHIM_NO_UFS)");
+	con_skip();
+#endif
+
+	/*
+	 * There is no dual boot: boot_a keeps the stock Android image but the
+	 * shim only ever loads the payload it carries, so the menu was five
+	 * seconds of countdown and one more thing that could go wrong before
+	 * the kernel's console appeared. The keyboard is still probed, because
+	 * the SPMI status bytes are worth seeing in a photo of a failed boot.
+	 */
+	stage = "menu";
+	spmi_init(dtb);
+#ifdef BOARD_REDMAGIC7
+	{
+		/*
+		 * Fan MCU reset: PM8350C (SID 2) GPIO6, peripheral 0x8d00
+		 * (live.dts nubia_fan@2a fan,reset-gpio). Android leaves it
+		 * driven low; drive it high (LV/MV gpio: DIG_OUT_SOURCE 0x44
+		 * invert bit = output 1, MODE_CTL 0x40 = output, EN_CTL 0x46).
+		 * The kernel powers the fan (ldoc11) and talks to it over I2C.
+		 */
+		uint8_t before = 0xff, after = 0xff;
+		int ok;
+
+		(void)spmi_read_reg(2, 0x8d44, &before);
+		ok = spmi_write(2, 0x8d44, 0x80) &&
+		    spmi_write(2, 0x8d40, 0x01) &&
+		    spmi_write(2, 0x8d46, 0x80);
+		(void)spmi_read_reg(2, 0x8d44, &after);
+		con_str("FAN RST", ok ? "released" : "write failed");
+		(void)before;
+		(void)after;
+	}
+#endif
+	con_clear(0xff10101aU);
+	con_skip();
+
+	const char *why = loader_boot(dtb);
+	con_str("LOADER", why);
+	con_skip();
+	delay_ms(180000);
+	reset(20);
+
+	stage = "fill off";
+	uint64_t fill_off = ticks_fill(RED);
+	uint64_t mem_off = ticks_mem();
+
+	stage = "mmu enable";
+	int rc = mmu_enable(&mi);
+
+	stage = "fill on";
+	uint64_t fill_on = rc ? 0 : ticks_fill(RED);
+	uint64_t mem_on = rc ? 0 : ticks_mem();
+	if (rc)
+		con_clear(RED);
+
+	con_str("SHIM", "sweet milestone 3");
+	con_skip();
+	con_hex2("DTB", "at=", dtb, "magic=", dtb ? __builtin_bswap32(rd32(dtb)) : 0);
+	con_hex2("IMAGE", "lo=", mi.img_lo, "hi=", mi.img_hi);
+	con_hex2("MMU", "rc=", rc, "l3=", mi.n_l3);
+	con_hex2("TTBR0", "pa=", mi.ttbr, "pa_hi=", mi.ttbr >> 32);
+	con_hex("SCTLR0", mi.sctlr_before);
+	con_hex("SCTLR1", mi.sctlr_after);
+	con_hex("TCR", rsr("tcr_el1"));
+	con_hex2("PARANGE", "mmfr0=", rsr("id_aa64mmfr0_el1") & 0xf, "tg16=", (rsr("id_aa64mmfr0_el1") >> 20) & 0xf);
+	con_skip();
+	con_hex("PAR img", mmu_probe((uintptr_t)shim_main));
+	con_hex("PAR fb", mmu_probe(FB_PHYS + 0x1000));
+	con_hex("PAR gic", mmu_probe(GICD_BASE));
+	con_hex("PAR 12G", mmu_probe(0x300000000UL));
+	con_skip();
+	con_hex2("FILL us", "off=", to_us(fill_off), "on=", to_us(fill_on));
+	con_hex2("MEM us", "off=", to_us(mem_off), "on=", to_us(mem_on));
+	con_skip();
+
+	stage = "psci";
+	con_hex2("PSCI", "ver=", smc(PSCI_VERSION, 0, 0, 0), "smccc=", smc(SMCCC_VERSION, 0, 0, 0));
+	con_skip();
+	test_gic();
+
+	stage = "done";
+	reset(40);
+}
