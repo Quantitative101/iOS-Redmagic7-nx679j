@@ -5,6 +5,8 @@ nubia RedMagic 7 (NX679J, Snapdragon 8 Gen 1 / SM8450 "waipio"). The phone boots
 from a small shim in `boot_a`, the kernel and device tree are built here, and the
 iOS root lives in a pinned file on the Android data partition.
 
+<p align="center"><img src="images/redmagic7-home-screen.jpg" alt="iOS 16 home screen on the RedMagic 7" width="360"></p>
+
 This repository holds **source only**: the kernel changes as a patch against
 Apple's `xnu-8796.141.3`, the boot shim, the payload and device-tree tools, the
 Wi-Fi driver glue and the GPU/userland helpers. No iOS, IPSW, Apple binaries or
