@@ -2188,11 +2188,16 @@ boundary_state(struct hakios_sta_state *state)
 		memcpy(state->bss.elements, radio->target.elements, radio->target.elements_length);
 	}
 	/* v180: the signal asked for again at most every 3 s, on the radio's work thread (this does not sleep) */
+	bool ask = false;
 	if (radio->joined && lx_os_nanoseconds() - radio->signal_at > 3000000000ull) {
 		radio->signal_at = lx_os_nanoseconds();
-		queue_work(radio->work, &radio->signal_work);
+		ask = true;
 	}
 	lx_os_unlock();
+	/* v181: queued with lx_lock let go: queue_work takes it too (v180: "Mutex lx_lock unexpectedly owned") */
+	if (ask) {
+		queue_work(radio->work, &radio->signal_work);
+	}
 }
 
 static unsigned

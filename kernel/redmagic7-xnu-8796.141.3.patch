@@ -28,10 +28,10 @@ index 4b8316078..cd71a54b4 100644
  # Directories for mig generated files
  #
 diff --git a/bsd/conf/files b/bsd/conf/files
-index 44274016a..e4ceb4f41 100644
+index 44274016a..bb19aa670 100644
 --- a/bsd/conf/files
 +++ b/bsd/conf/files
-@@ -104,6 +104,12 @@ bsd/dev/dtrace/fasttrap.c		optional config_dtrace
+@@ -104,6 +104,13 @@ bsd/dev/dtrace/fasttrap.c		optional config_dtrace
  bsd/dev/random/randomdev.c		standard
  
  bsd/dev/memdev.c			standard
@@ -39,12 +39,13 @@ index 44274016a..e4ceb4f41 100644
 +bsd/dev/mondrian_sample.c		standard
 +bsd/dev/mondrian_clock.c		standard
 +bsd/dev/mondrian_touch.c		standard
++bsd/dev/rm_fan_geni.c		standard
 +bsd/dev/mondrian_cpufreq.c		standard
 +bsd/dev/mondrian_gpu.c			standard
  bsd/dev/mem.c				standard
  bsd/dev/munge.c 			optional config_requires_u32_munging
  bsd/dev/unix_startup.c			standard
-@@ -361,6 +367,9 @@ bsd/security/audit/audit_syscalls.c		standard
+@@ -361,6 +368,9 @@ bsd/security/audit/audit_syscalls.c		standard
  bsd/security/audit/audit_worker.c		optional config_audit
  
  bsd/pthread/pthread_shims.c		standard
@@ -54,7 +55,7 @@ index 44274016a..e4ceb4f41 100644
  bsd/pthread/pthread_priority.c		standard
  bsd/pthread/pthread_workqueue.c		standard
  
-@@ -378,6 +387,50 @@ bsd/kern/kern_core.c			optional config_coredump
+@@ -378,6 +388,50 @@ bsd/kern/kern_core.c			optional config_coredump
  bsd/kern/kern_credential.c		standard
  bsd/kern/kern_crossarch.c		standard
  bsd/kern/kern_cs.c			standard
@@ -105,7 +106,7 @@ index 44274016a..e4ceb4f41 100644
  bsd/kern/kern_csr.c			optional config_csr
  bsd/kern/kern_debug.c			standard
  bsd/kern/kern_symfile.c			standard
-@@ -594,3 +647,16 @@ bsd/skywalk/packet/packet_kern.c		optional skywalk
+@@ -594,3 +648,17 @@ bsd/skywalk/packet/packet_kern.c		optional skywalk
  bsd/skywalk/packet/pbufpool.c			optional skywalk
  bsd/skywalk/packet/pbufpool_kern.c		optional skywalk
  bsd/dev/cpu_copy_in_cksum_gen.c			optional skywalk
@@ -121,12 +122,13 @@ index 44274016a..e4ceb4f41 100644
 +bsd/dev/rmwifi/umi_rpmh.c		standard
 +bsd/dev/rmwifi/umi_wifi.c		standard
 +bsd/dev/rmwifi/rm_glue.c		standard
++bsd/dev/rmwifi/rm_bt.c		standard
 +bsd/dev/rm_blob.c		standard
 diff --git a/bsd/dev/mem.c b/bsd/dev/mem.c
-index c64e63601..4f9ec4b5b 100644
+index c64e63601..81e222134 100644
 --- a/bsd/dev/mem.c
 +++ b/bsd/dev/mem.c
-@@ -153,6 +153,60 @@ mmioctl(dev_t dev, u_long cmd, __unused caddr_t data,
+@@ -153,6 +153,62 @@ mmioctl(dev_t dev, u_long cmd, __unused caddr_t data,
  	return 0;
  }
  
@@ -155,7 +157,9 @@ index c64e63601..4f9ec4b5b 100644
 +	size_t n = strlen(name);
 +	/* v148: the apps the user listed as not drawing */
 +	{
-+		static const char *const apps[] = { "MobileNotes", "FaceTime", "AppleTV", "Passbook", "Podcasts", "News", "Maps", "MobilePhone", "Measure", "Magnifier", "MobileSafari", "VoiceMemos", "Compass", "accountsd", "wifid" };
++		static const char *const apps[] = { "MobileNotes", "FaceTime", "AppleTV", "Passbook", "Podcasts", "News", "Maps", "MobilePhone", "Measure", "Magnifier", "MobileSafari", "VoiceMemos", "Compass", "accountsd", "wifid",
++		    /* v193: the daemons ca-watch dumps (injected since v190/v191, their words went nowhere) */
++		    "lockdownd", "passd", "vmd", "mediaserverd" };
 +		for (unsigned a = 0; a < sizeof(apps) / sizeof(apps[0]); a++) {
 +			if (strcmp(name, apps[a]) == 0) {
 +				return true;
@@ -187,7 +191,7 @@ index c64e63601..4f9ec4b5b 100644
  int
  mmrw(dev_t dev, struct uio *uio, enum uio_rw rw)
  {
-@@ -216,6 +270,22 @@ mmrw(dev_t dev, struct uio *uio, enum uio_rw rw)
+@@ -216,6 +272,22 @@ mmrw(dev_t dev, struct uio *uio, enum uio_rw rw)
  			if (rw == UIO_READ) {
  				return 0;
  			}
@@ -362,10 +366,10 @@ index 000000000..662b085e0
 +}
 diff --git a/bsd/dev/mondrian_cpufreq.c b/bsd/dev/mondrian_cpufreq.c
 new file mode 100644
-index 000000000..c629ba117
+index 000000000..aef52433a
 --- /dev/null
 +++ b/bsd/dev/mondrian_cpufreq.c
-@@ -0,0 +1,111 @@
+@@ -0,0 +1,176 @@
 +/*
 + * MONDRIAN: put the CPU clusters at their top EPSS row.
 + *
@@ -382,6 +386,7 @@ index 000000000..c629ba117
 +#include <sys/systm.h>
 +#include <machine/machine_routines.h>
 +#include <pexpert/pexpert.h>
++#include <kern/clock.h>
 +
 +extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
 +
@@ -424,6 +429,70 @@ index 000000000..c629ba117
 +		mhz = (((v >> 30) & 3u) ? MONDRIAN_XO_KHZ * (v & 0xffu) : MONDRIAN_ALTERNATE_KHZ) / 1000;
 +	}
 +	return mhz;
++}
++
++/*
++ * RedMagic v199: the clocks follow the screen. The cores ran at their top row all the time (heat: SoC 73-77 C on
++ * average in use, ring215/216); now, when no frame has been drawn and nothing touched for a second, every domain
++ * drops rmdvfs_idle rows below its top (default 12), and goes back to the top the moment a finger is down (from the
++ * touch reader) or frames are drawn again (from the framebuffer's governor, every half second). The thermal cap's
++ * rows (80 C and up) still apply on top: the lower of the two clocks wins. Boot-arg rmdvfs=0: top row always.
++ */
++static uint32_t cf_thermal, cf_idle_steps = 12, cf_applied = 0xffffffffu, cf_idle_ticks, cf_logged;
++static int cf_on = -1, cf_idle;
++static uint64_t cf_touch_at;
++
++static void
++cf_apply(const char *why)
++{
++	const uint32_t want = (cf_idle && cf_idle_steps > cf_thermal) ? cf_idle_steps : cf_thermal;
++	if (want == cf_applied) {
++		return;
++	}
++	const uint32_t mhz = mondrian_cpufreq_cap(want);
++	cf_applied = want;
++	if (cf_logged++ < 300) {
++		printf("MONDRIAN DVFS: %s: %u rows below top, biggest cluster %u MHz\n", why, want, mhz);
++	}
++}
++
++void mondrian_cpufreq_policy(uint32_t thermalSteps, uint32_t moving);
++void
++mondrian_cpufreq_policy(uint32_t thermalSteps, uint32_t moving)
++{
++	if (cf_on < 0) {
++		int on = 1;
++		uint32_t idle = 12;
++		PE_parse_boot_argn("rmdvfs", &on, sizeof(on));
++		PE_parse_boot_argn("rmdvfs_idle", &idle, sizeof(idle));
++		cf_on = on != 0;
++		cf_idle_steps = idle > 30 ? 30 : idle;
++		printf("MONDRIAN DVFS: %s, idle %u rows below top\n", cf_on ? "on" : "off (rmdvfs=0)", cf_idle_steps);
++	}
++	cf_thermal = thermalSteps;
++	uint64_t second = 0;
++	nanoseconds_to_absolutetime(1000000000ull, &second);
++	const int touched = cf_touch_at != 0 && mach_absolute_time() - cf_touch_at < second;
++	if (moving >= 2 || touched) {
++		cf_idle_ticks = 0;
++	} else if (cf_idle_ticks < 1000) {
++		cf_idle_ticks++;
++	}
++	cf_idle = cf_on && cf_idle_ticks >= 2;
++	cf_apply(cf_idle ? "screen still" : (moving >= 2 ? "screen moving" : "touched"));
++}
++
++/* from the touch reader, every report with a finger down: the top row at once if the clocks were down */
++void mondrian_cpufreq_touch(void);
++void
++mondrian_cpufreq_touch(void)
++{
++	cf_touch_at = mach_absolute_time();
++	if (cf_idle) {
++		cf_idle = 0;
++		cf_idle_ticks = 0;
++		cf_apply("finger down");
++	}
 +}
 +
 +int
@@ -479,10 +548,10 @@ index 000000000..c629ba117
 +}
 diff --git a/bsd/dev/mondrian_gpu.c b/bsd/dev/mondrian_gpu.c
 new file mode 100644
-index 000000000..42a9224f1
+index 000000000..0c9861f34
 --- /dev/null
 +++ b/bsd/dev/mondrian_gpu.c
-@@ -0,0 +1,4162 @@
+@@ -0,0 +1,4380 @@
 +/*
 + * MONDRIAN GPU: the first look at the Adreno 730 blocks.
 + *
@@ -505,6 +574,11 @@ index 000000000..42a9224f1
 +#include <sys/systm.h>
 +#include <kern/clock.h>
 +#include <machine/machine_routines.h>
++#include <kern/thread.h>
++#include <kern/sched_prim.h>
++#include <mach/machine.h>
++extern int get_preemption_level(void);                  /* osfmk/arm/cpu_data.h */
++extern processor_t cpu_to_processor(int cpu);           /* osfmk/kern/processor.h */
 +#include <arm/caches_internal.h>
 +#include <vm/pmap.h>
 +#include <vm/vm_kern.h>
@@ -559,10 +633,17 @@ index 000000000..42a9224f1
 + * CoreAnimation's IOMFBServer through it; set by MondrianFramebuffer when vsync notifications are turned on */
 +uint64_t mondrian_fb_vsync_refcon;
 +SYSCTL_QUAD(_kern, OID_AUTO, mondrian_vsync_refcon, CTLFLAG_RD | CTLFLAG_LOCKED, &mondrian_fb_vsync_refcon, "");
++/*
++ * v211: the period of the vsync the framebuffer sends (the panel's measured TE period when locked to it), in ns, for
++ * ca-watch to hand CoreAnimation as CA_HEARTBEAT_RATE: without a digital-out mode it counts on (the built-in panel's
++ * TimingElements are dropped unless IsVirtual), AppleCLCDDisplay's heartbeat falls back to 1/60 s.
++ */
++uint32_t mondrian_fb_period_ns;
++SYSCTL_UINT(_kern, OID_AUTO, mondrian_fb_period_ns, CTLFLAG_RD | CTLFLAG_LOCKED, &mondrian_fb_period_ns, 0, "");
 +static uint32_t mondrian_uc_resets;	/* v83: GPU resets after a hang (MSM_PARAM_FAULTS) */
 +static uint32_t mondrian_uc_table_next = 1;
 +static uint64_t mondrian_uc_iova = MONDRIAN_UC_IOVA_BASE;
-+#define MONDRIAN_IOVA_FREE_MAX 2048
++#define MONDRIAN_IOVA_FREE_MAX 8192      /* v190: was 2048; a range freed with the list full was lost for good */
 +static struct {
 +	uint64_t start, len;
 +} mondrian_iova_free_list[MONDRIAN_IOVA_FREE_MAX];
@@ -3521,6 +3602,29 @@ index 000000000..42a9224f1
 +	return iova;
 +}
 +
++/*
++ * RedMagic v190: the GPU address space and page-table pool as they stand, for gem_new's refusal line: the bump
++ * pointer, the free list's ranges and bytes, and the tables used of the pool's.
++ */
++void mondrian_gpu_uc_iova_stats(uint64_t *bump, uint32_t *ranges, uint64_t *freeBytes, uint32_t *tables,
++    uint32_t *tablesMax);
++void
++mondrian_gpu_uc_iova_stats(uint64_t *bump, uint32_t *ranges, uint64_t *freeBytes, uint32_t *tables,
++    uint32_t *tablesMax)
++{
++	uint64_t bytes = 0;
++	mondrian_iova_lock();
++	for (uint32_t i = 0; i < mondrian_iova_nfree; i++) {
++		bytes += mondrian_iova_free_list[i].len;
++	}
++	*bump = mondrian_uc_iova;
++	*ranges = mondrian_iova_nfree;
++	mondrian_iova_unlock();
++	*freeBytes = bytes;
++	*tables = mondrian_uc_table_next;
++	*tablesMax = (uint32_t)(mondrian_cp_tables.bytes / 4096ull);
++}
++
 +/* RedMagic v139: a buffer's range given back once its pages are unmapped (and the TLB invalidated) */
 +void mondrian_gpu_uc_iova_free(uint64_t iova, uint64_t bytes);
 +void
@@ -4207,16 +4311,132 @@ index 000000000..42a9224f1
 +	return 0;
 +}
 +
++/*
++ * RedMagic v198: a fence is waited for asleep. The wait was a loop of reads until the CP wrote the fence -- a whole
++ * big core for as long as the GPU worked, in every waiter at once: the plug-in's completion thread in each process
++ * that draws, the framebuffer's swap thread (2 ms of every frame) and whoever closed a buffer -- on a phone that runs
++ * its four big cores only and sits at 70-85 C. Once the framebuffer has started (mondrian_gpu_uc_wait_mode), a wait
++ * that is not over after a short spin sleeps in steps of STEP microseconds (150; boot-arg gpuwait_us, 0 spins as
++ * before) on a deadline with no leeway, and the vsync timer wakes every sleeper too (mondrian_gpu_uc_wait_kick), so
++ * a deadline that did not fire costs a frame at most. A caller that may not block (interrupts or preemption off)
++ * spins as before.
++ */
++static int mondrian_uc_wait_event;
++static uint64_t mondrian_uc_wait_step;         /* host ticks a sleep lasts; 0: spin */
++static uint64_t mondrian_uc_wait_spin;         /* host ticks spun before the first sleep */
++static volatile uint64_t mondrian_uc_wait_count, mondrian_uc_wait_ticks, mondrian_uc_wait_sleeps, mondrian_uc_wait_kicked;
++/* the first 400 sleeps judged: over a millisecond late in more than half of them, the deadlines do not fire on time
++ * here (earlier notes on this board said timeouts never fired) and the waits go back to spinning for the session */
++static uint32_t mondrian_uc_wait_judged, mondrian_uc_wait_late;
++static uint64_t mondrian_uc_wait_slack;        /* host ticks in a millisecond */
++
++void mondrian_gpu_uc_wait_mode(uint32_t step_us);
++void
++mondrian_gpu_uc_wait_mode(uint32_t step_us)
++{
++	uint64_t t = 0;
++
++	(void)PE_parse_boot_argn("gpuwait_us", &step_us, sizeof(step_us));
++	nanoseconds_to_absolutetime(30000ull, &t);
++	mondrian_uc_wait_spin = t;
++	nanoseconds_to_absolutetime(1000000ull, &t);
++	mondrian_uc_wait_slack = t;
++	nanoseconds_to_absolutetime((uint64_t)step_us * 1000ull, &t);
++	mondrian_uc_wait_step = step_us != 0 ? t : 0;
++	printf("MONDRIAN GPU: fence waits %s (%u us steps after 30 us; gpuwait_us=0 spins)\n",
++	    step_us != 0 ? "sleep" : "spin", step_us);
++}
++
++void mondrian_gpu_uc_wait_kick(void);
++void
++mondrian_gpu_uc_wait_kick(void)
++{
++	/* (whenever sleeping was ever on: a waiter may still be asleep after the waits went back to spinning) */
++	if (mondrian_uc_wait_slack != 0) {
++		thread_wakeup((event_t)&mondrian_uc_wait_event);
++	}
++}
++
++/* the waits since the last call: how many, their microseconds in all, the sleeps in them, the sleeps the vsync ended */
++void mondrian_gpu_uc_wait_stats(uint64_t out[4]);
++void
++mondrian_gpu_uc_wait_stats(uint64_t out[4])
++{
++	uint64_t ns = 0;
++
++	out[0] = __sync_lock_test_and_set(&mondrian_uc_wait_count, 0);
++	absolutetime_to_nanoseconds(__sync_lock_test_and_set(&mondrian_uc_wait_ticks, 0), &ns);
++	out[1] = ns / 1000ull;
++	out[2] = __sync_lock_test_and_set(&mondrian_uc_wait_sleeps, 0);
++	out[3] = __sync_lock_test_and_set(&mondrian_uc_wait_kicked, 0);
++}
++
++static void
++mondrian_uc_wait_note(uint64_t began, uint32_t sleeps, uint32_t kicked)
++{
++	(void)__sync_fetch_and_add(&mondrian_uc_wait_count, 1);
++	(void)__sync_fetch_and_add(&mondrian_uc_wait_ticks, mach_absolute_time() - began);
++	(void)__sync_fetch_and_add(&mondrian_uc_wait_sleeps, sleeps);
++	(void)__sync_fetch_and_add(&mondrian_uc_wait_kicked, kicked);
++}
++
++/* RedMagic v198: has the CP written FENCE (or one after it)? Memory only, never waits. A fence never handed out: yes. */
++int mondrian_gpu_uc_fence_passed(uint32_t fence);
++int
++mondrian_gpu_uc_fence_passed(uint32_t fence)
++{
++	volatile uint32_t *view = (volatile uint32_t *)mondrian_cp_memptr_view;
++
++	if (view == NULL || fence == 0 || fence > mondrian_uc_fence) {
++		return 1;
++	}
++	__asm__ volatile("dsb sy" ::: "memory");
++	return (int32_t)(view[mondrian_uc_fence_word(fence)] - fence) >= 0;
++}
++
++/*
++ * RedMagic v198: how busy each processor was since the last call, in percent (0-100; 255: no such processor), from
++ * the scheduler's own idle time -- for the framebuffer's load line: are the four big cores full while a frame is late?
++ */
++extern void processor_cpu_load_info(processor_t processor, natural_t ticks[]);   /* osfmk/kern/processor.c */
++void mondrian_cpu_busy_percent(uint8_t out[8]);
++void
++mondrian_cpu_busy_percent(uint8_t out[8])
++{
++	static natural_t last[8][CPU_STATE_MAX];
++
++	for (int cpu = 0; cpu < 8; cpu++) {
++		processor_t p = cpu_to_processor(cpu);
++		natural_t ticks[CPU_STATE_MAX] = { 0 };
++		uint32_t busy = 0, all = 0;
++
++		out[cpu] = 255;
++		if (p == PROCESSOR_NULL) {
++			continue;
++		}
++		processor_cpu_load_info(p, ticks);
++		for (int s = 0; s < CPU_STATE_MAX; s++) {
++			uint32_t d = ticks[s] - last[cpu][s];
++
++			last[cpu][s] = ticks[s];
++			all += d;
++			busy += s == CPU_STATE_IDLE ? 0 : d;
++		}
++		out[cpu] = all != 0 ? (uint8_t)(100u * busy / all) : 0;
++	}
++}
++
 +int
 +mondrian_gpu_uc_wait(uint32_t fence, uint32_t timeout_ms)
 +{
 +	volatile uint32_t *view = (volatile uint32_t *)mondrian_cp_memptr_view;
-+	uint32_t limit, value;
-+	uint64_t step = 0, deadline;
++	uint32_t limit, value, sleeps = 0, kicked = 0;
++	uint64_t step = 0, deadline, began, now;
 +
 +	if (view == NULL || fence == 0 || fence > mondrian_uc_fence) {
 +		return -1;
 +	}
++	began = mach_absolute_time();
 +	limit = timeout_ms != 0 ? timeout_ms : 5000u;
 +	/*
 +	 * RedMagic v30: the deadline by the counter. It was counted in delay(1000) steps, and delay does not fire on this
@@ -4225,11 +4445,12 @@ index 000000000..42a9224f1
 +	 * drawn, and what the CPU read of it (the plug-in's write-backs, the framebuffer's copy) was the old contents.
 +	 */
 +	nanoseconds_to_absolutetime((uint64_t)limit * 1000000ull, &step);
-+	deadline = mach_absolute_time() + step;
++	deadline = began + step;
 +	for (;;) {
 +		__asm__ volatile("dsb sy" ::: "memory");
 +		value = view[mondrian_uc_fence_word(fence)];
 +		if ((int32_t)(value - fence) >= 0) {
++			mondrian_uc_wait_note(began, sleeps, kicked);
 +			/*
 +			 * The first ten, and after them any fence that finds an interrupt, a CP fault or an SMMU
 +			 * fault status other than the 0x400 the probe leaves (with the fault address), so a
@@ -4262,13 +4483,79 @@ index 000000000..42a9224f1
 +			}
 +			return 0;
 +		}
-+		if (mach_absolute_time() > deadline) {
++		now = mach_absolute_time();
++		if (now > deadline) {
++			mondrian_uc_wait_note(began, sleeps, kicked);
 +			return -1;
 +		}
-+		__builtin_arm_yield();
++		/* v198: asleep for a step, once the short spin is over and where sleeping is allowed */
++		if (mondrian_uc_wait_step == 0 || now - began < mondrian_uc_wait_spin || !ml_get_interrupts_enabled() ||
++		    get_preemption_level() != 0) {
++			__builtin_arm_yield();
++			continue;
++		}
++		{
++			wait_result_t wr = assert_wait_deadline_with_leeway((event_t)&mondrian_uc_wait_event, THREAD_UNINT,
++			    TIMEOUT_URGENCY_SYS_CRITICAL | TIMEOUT_URGENCY_LEEWAY, now + mondrian_uc_wait_step, 0);
++
++			if (wr == THREAD_WAITING) {
++				wr = thread_block(THREAD_CONTINUE_NULL);
++			}
++			sleeps++;
++			kicked += wr == THREAD_AWAKENED;
++			if (mondrian_uc_wait_judged < 400) {
++				const uint64_t slept = mach_absolute_time() - now;
++
++				mondrian_uc_wait_late += slept > mondrian_uc_wait_step + mondrian_uc_wait_slack;
++				if (++mondrian_uc_wait_judged == 400) {
++					if (mondrian_uc_wait_late > 200) {
++						mondrian_uc_wait_step = 0;
++					}
++					printf("MONDRIAN GPU: fence waits: %u of the first 400 sleeps ended over 1 ms late: %s\n",
++					    mondrian_uc_wait_late, mondrian_uc_wait_step != 0 ? "sleeping stays" : "BACK TO SPINNING");
++				}
++			}
++		}
 +	}
 +}
 +#else /* !MONDRIAN_CP_PROFILE */
++void mondrian_gpu_uc_wait_mode(uint32_t step_us);
++void
++mondrian_gpu_uc_wait_mode(uint32_t step_us)
++{
++	(void)step_us;
++}
++
++void mondrian_gpu_uc_wait_kick(void);
++void
++mondrian_gpu_uc_wait_kick(void)
++{
++}
++
++void mondrian_gpu_uc_wait_stats(uint64_t out[4]);
++void
++mondrian_gpu_uc_wait_stats(uint64_t out[4])
++{
++	out[0] = out[1] = out[2] = out[3] = 0;
++}
++
++int mondrian_gpu_uc_fence_passed(uint32_t fence);
++int
++mondrian_gpu_uc_fence_passed(uint32_t fence)
++{
++	(void)fence;
++	return 1;
++}
++
++void mondrian_cpu_busy_percent(uint8_t out[8]);
++void
++mondrian_cpu_busy_percent(uint8_t out[8])
++{
++	for (int i = 0; i < 8; i++) {
++		out[i] = 255;
++	}
++}
++
 +/*
 + * No profile: the CP path above is not built, but MondrianGPU.cpp still
 + * links against this surface. Keep the user client inert instead of
@@ -4732,10 +5019,10 @@ index 000000000..69bc88e29
 +#endif /* _BSD_DEV_MONDRIAN_GPU_API_H_ */
 diff --git a/bsd/dev/mondrian_sample.c b/bsd/dev/mondrian_sample.c
 new file mode 100644
-index 000000000..734613e69
+index 000000000..647b55418
 --- /dev/null
 +++ b/bsd/dev/mondrian_sample.c
-@@ -0,0 +1,493 @@
+@@ -0,0 +1,596 @@
 +/*
 + * MONDRIAN process sampler: where is a daemon stuck?
 + *
@@ -4767,6 +5054,100 @@ index 000000000..734613e69
 +extern void mondrian_sample_task(const char *name, int pid, task_t task);
 +extern uint64_t mondrian_sample_task_pc(task_t task);
 +void mondrian_sample_tick(void);
++
++/*
++ * RedMagic v199: who uses the CPUs. v198's load line had the four big cores 93-100 % busy most of the time
++ * (ring216) with the GPU waits already sleeping; a load-based clock cannot help until that is known. At every tick
++ * (about 5 s apart) each process's CPU time since the last one (task_info TASK_ABSOLUTETIME_INFO: user + system,
++ * terminated threads included), and the six largest as a share of one core: "CPUTOP 5.0 s: name(pid) 97% ...".
++ * kernel_task (pid 0) counts every kernel thread.
++ */
++extern kern_return_t task_info(task_t task, task_flavor_t flavor, task_info_t task_info_out,
++    mach_msg_type_number_t *task_info_count);
++#define CPUTOP_SLOTS 768
++static struct {
++	int pid;
++	uint64_t total;         /* absolute time units */
++	uint64_t delta;
++	uint32_t seen;          /* the tick it was last seen in */
++	char name[17];
++} cputop[CPUTOP_SLOTS];
++static uint32_t cputop_tick;
++
++static int
++cputop_proc(proc_t p, __unused void *arg)
++{
++	task_t task = proc_task(p);
++	struct task_absolutetime_info info;
++	mach_msg_type_number_t count = TASK_ABSOLUTETIME_INFO_COUNT;
++	int pid = proc_pid(p);
++
++	if (task == TASK_NULL || task_info(task, TASK_ABSOLUTETIME_INFO, (task_info_t)&info, &count) != KERN_SUCCESS) {
++		return PROC_RETURNED;
++	}
++	const uint64_t total = info.total_user + info.total_system;
++	int slot = -1, empty = -1;
++	for (int i = 0; i < CPUTOP_SLOTS; i++) {
++		if (cputop[i].seen != 0 && cputop[i].pid == pid) {
++			slot = i;
++			break;
++		}
++		if (empty < 0 && (cputop[i].seen == 0 || cputop[i].seen + 2 < cputop_tick)) {
++			empty = i;
++		}
++	}
++	if (slot < 0) {
++		if (empty < 0) {
++			return PROC_RETURNED;
++		}
++		slot = empty;
++		cputop[slot].pid = pid;
++		cputop[slot].total = total;     /* first sight: no delta yet */
++		cputop[slot].delta = 0;
++	} else {
++		cputop[slot].delta = total >= cputop[slot].total ? total - cputop[slot].total : 0;
++		cputop[slot].total = total;
++	}
++	cputop[slot].seen = cputop_tick;
++	strlcpy(cputop[slot].name, proc_best_name(p), sizeof(cputop[slot].name));
++	return PROC_RETURNED;
++}
++
++static void
++cputop_report(uint64_t now_ns)
++{
++	static uint64_t last_ns;
++
++	cputop_tick++;
++	proc_iterate(PROC_ALLPROCLIST, cputop_proc, NULL, NULL, NULL);
++	if (last_ns != 0 && now_ns > last_ns) {
++		const uint64_t window = now_ns - last_ns;
++		int top[6] = { -1, -1, -1, -1, -1, -1 };
++		uint64_t all = 0;
++		for (int i = 0; i < CPUTOP_SLOTS; i++) {
++			if (cputop[i].seen != cputop_tick) continue;
++			all += cputop[i].delta;
++			for (int k = 0; k < 6; k++) {
++				if (top[k] < 0 || cputop[i].delta > cputop[top[k]].delta) {
++					for (int m = 5; m > k; m--) top[m] = top[m - 1];
++					top[k] = i;
++					break;
++				}
++			}
++		}
++		uint64_t all_ns = 0;
++		absolutetime_to_nanoseconds(all, &all_ns);
++		printf("CPUTOP %llu.%llu s, all %llu%% of one core:", window / 1000000000ULL, (window / 100000000ULL) % 10,
++		    all_ns * 100 / window);
++		for (int k = 0; k < 6 && top[k] >= 0; k++) {
++			uint64_t ns = 0;
++			absolutetime_to_nanoseconds(cputop[top[k]].delta, &ns);
++			printf(" %s(%d) %llu%%", cputop[top[k]].name, cputop[top[k]].pid, ns * 100 / window);
++		}
++		printf("\n");
++	}
++	last_ns = now_ns;
++}
 +
 +#define MONDRIAN_SAMPLE_MAX     3
 +
@@ -5005,6 +5386,15 @@ index 000000000..734613e69
 +	}
 +	proc_iterate(PROC_ALLPROCLIST, mondrian_sample_list, NULL, NULL, NULL);
 +
++	cputop_report(now);     /* v199 */
++	{
++		/* v200: the kernel's hot spots on the big cores, every fifth tick */
++		extern void mondrian_prof_report(void);
++		static unsigned prof_ticks;
++		if ((++prof_ticks % 5) == 0) {
++			mondrian_prof_report();
++		}
++	}
 +	printf("SMP t=%llus %d procs", (unsigned long long)(now / 1000000000ULL),
 +	    mondrian_proc_count);
 +	for (int k = 0; k < mondrian_names_count; k++) {
@@ -5231,10 +5621,10 @@ index 000000000..734613e69
 +}
 diff --git a/bsd/dev/mondrian_touch.c b/bsd/dev/mondrian_touch.c
 new file mode 100644
-index 000000000..375cca0c8
+index 000000000..5ec520c05
 --- /dev/null
 +++ b/bsd/dev/mondrian_touch.c
-@@ -0,0 +1,2585 @@
+@@ -0,0 +1,2963 @@
 +/*
 + * MONDRIAN touch: the digitizer's pins.
 + *
@@ -6345,6 +6735,16 @@ index 000000000..375cca0c8
 +#define RM_FAN_SCL_GPIO		61
 +#define RM_FAN_I2C_ADDR		0x2a
 +static int rm_fan;
++/*
++ * RedMagic v185: the MCU's bus through its own GENI engine (rm_fan_geni.c, QUP2 SE1 = qupv3_se16 at 0x884000), as
++ * Android drives it; the bit-banged bus below never got an ACK. When the engine comes up, gpio60/61 belong to it
++ * (function qup16) and the bit-banged diagnostics and writes are skipped.
++ */
++static int rm_fan_geni;
++extern int rm_fan_geni_init(void);
++extern int rm_fan_geni_write(uint8_t addr, const uint8_t *buf, uint32_t len);
++extern int rm_fan_geni_read(uint8_t addr, uint8_t reg, uint8_t *out, uint32_t len);
++extern int rm_fan_geni_read_raw(uint8_t addr, uint8_t *out, uint32_t len);
 +static vm_offset_t rm_fan_sda, rm_fan_scl;
 +static int rm_fan_duty = -1, rm_fan_temp = -1000, rm_fan_acks, rm_fan_fails;
 +static uint32_t rm_fan_ticks;
@@ -6570,19 +6970,119 @@ index 000000000..375cca0c8
 +	stable = now;
 +}
 +
-+/* PM8350C GPIO6 as a push-pull output at the given level. */
++/*
++ * PM8350C GPIO6 as a push-pull output at the given level. RedMagic v186: the whole pad as Android leaves it with
++ * the fan running (its regmap, read live: 0x40 01, 0x41 00 VIN0, 0x42 04 pull-down, 0x44 80 high, 0x45 03 push-pull
++ * low strength, 0x46 80 enabled; live.dts fan_mcu_rst_default), except the mode: 02, input and output, so the pad's
++ * real level reads back (RT_STS 0x10 bit 0). Before, only 0x40/0x44/0x46 were written: VIN, pull and drive stayed
++ * whatever the boot chain left, and a drive strength of 0 drives nothing.
++ */
 +static int
 +rm_fan_reset_line(int high)
 +{
-+	int rc = rm_spmi_write(2, 0x8d44, high ? 0x80 : 0x00);
++	static const struct {
++		uint16_t reg;
++		uint8_t val;
++	} pad[] = {
++		{ 0x8d41, 0x00 }, { 0x8d42, 0x04 }, { 0x8d45, 0x03 }, { 0x8d40, 0x02 },
++	};
++	int rc = 0;
 +
++	for (uint32_t i = 0; rc == 0 && i < sizeof(pad) / sizeof(pad[0]); i++) {
++		rc = rm_spmi_write(2, pad[i].reg, pad[i].val);
++	}
 +	if (rc == 0) {
-+		rc = rm_spmi_write(2, 0x8d40, 0x01);
++		rc = rm_spmi_write(2, 0x8d44, high ? 0x80 : 0x00);
 +	}
 +	if (rc == 0) {
 +		rc = rm_spmi_write(2, 0x8d46, 0x80);
 +	}
 +	return rc;
++}
++
++/* the reset pad's level as the PMIC sees it: 0/1, or -1 when it cannot be read */
++static int
++rm_fan_reset_level(void)
++{
++	extern int rm_spmi_read(uint8_t, uint16_t, uint8_t *);
++	uint8_t v = 0xee;
++
++	if (rm_spmi_read(2, 0x8d10, &v) < 0) {
++		return -1;
++	}
++	return v & 1;
++}
++
++/* every GPIO6 register that matters, for the log */
++static void
++rm_fan_reset_dump(const char *when)
++{
++	extern int rm_spmi_read(uint8_t, uint16_t, uint8_t *);
++	static const uint16_t regs[] = { 0x8d08, 0x8d10, 0x8d40, 0x8d41, 0x8d42, 0x8d44, 0x8d45, 0x8d46 };
++	uint8_t v[8];
++
++	for (uint32_t i = 0; i < 8; i++) {
++		v[i] = 0xee;
++		(void)rm_spmi_read(2, regs[i], &v[i]);
++	}
++	printf("RM FAN: gpio6 %s: status1 %#x rt_sts %#x mode %#x vin %#x pull %#x out %#x drive %#x en %#x "
++	    "(Android running: mode 1 vin 0 pull 4 out 0x80 drive 3 en 0x80)\n",
++	    when, v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
++}
++
++/*
++ * RedMagic v186: is the MCU there at all? Its boot loader answers right after a reset pulse: fan_core.c
++ * fan_hw_reset (high, 1 ms low, high, then 0.4-1.8 ms) and MAX28200_program (write 0x55, 75 us, read one byte:
++ * 0x3e). Only the magic and the prompt, never a command; then the reset pulse Nubia ends an update with and its
++ * 100 ms, so the MCU's own program starts again.
++ */
++static void
++rm_fan_boot_loader_probe(void)
++{
++	static const uint32_t waits_us[] = { 900, 1200, 600, 1500, 400, 1800 };
++	int answered = 0;
++
++	for (uint32_t i = 0; i < sizeof(waits_us) / sizeof(waits_us[0]) && !answered; i++) {
++		uint8_t magic = 0x55, prompt = 0xee;
++
++		(void)rm_spmi_write(2, 0x8d44, 0x80);
++		mondrian_spi_delay(1000000u);
++		(void)rm_spmi_write(2, 0x8d44, 0x00);
++		mondrian_spi_delay(1000000u);
++		(void)rm_spmi_write(2, 0x8d44, 0x80);
++		mondrian_spi_delay(waits_us[i] * 1000u);
++		int w = rm_fan_geni_write(RM_FAN_I2C_ADDR, &magic, 1);
++		mondrian_spi_delay(75000u);
++		int r = rm_fan_geni_read_raw(RM_FAN_I2C_ADDR, &prompt, 1);
++		answered = (r == 0 && prompt == 0x3e);
++		printf("RM FAN: boot loader probe, %u us after reset: magic rc %d, prompt %#x rc %d%s\n", waits_us[i], w,
++		    prompt, r, answered ? ": the MCU's boot loader answers, so the bus and the MCU work" : "");
++	}
++	(void)rm_spmi_write(2, 0x8d44, 0x80);
++	mondrian_spi_delay(1000000u);
++	(void)rm_spmi_write(2, 0x8d44, 0x00);
++	mondrian_spi_delay(1000000u);
++	(void)rm_spmi_write(2, 0x8d44, 0x80);
++	mondrian_spi_delay(100000000u);
++	printf("RM FAN: boot loader probe done (%s); MCU reset again, 100 ms\n", answered ? "answered" : "no answer");
++	mondrian_log_flush_now();
++}
++
++/*
++ * RedMagic v186: read the MCU's firmware version (0x09, two bytes, fan_core.c fan_firmware_check: 5) every 50 ms
++ * for up to a second; the milliseconds until it first answers, or -1.
++ */
++static int
++rm_fan_wait_answer(uint8_t ver[2])
++{
++	for (int ms = 0; ms <= 1000; ms += 50) {
++		ver[0] = ver[1] = 0xee;
++		if (rm_fan_geni_read(RM_FAN_I2C_ADDR, 0x09, ver, 2) == 0) {
++			return ms;
++		}
++		mondrian_spi_delay(50000000u);
++	}
++	return -1;
 +}
 +
 +static int
@@ -6592,6 +7092,16 @@ index 000000000..375cca0c8
 +	uint32_t i;
 +	int rc = 0;
 +
++	if (rm_fan_geni) {
++		/* v185: the GENI engine */
++		rc = rm_fan_geni_write(RM_FAN_I2C_ADDR, buf, len);
++		if (rc == 0) {
++			rm_fan_acks++;
++		} else {
++			rm_fan_fails++;
++		}
++		return rc == 0 ? 0 : -1;
++	}
 +	if (rm_fan_sda == 0 || rm_fan_scl == 0) {
 +		return -1;
 +	}
@@ -6664,11 +7174,15 @@ index 000000000..375cca0c8
 +		printf("RM FAN: pin map failed\n");
 +		return;
 +	}
-+	/* Both lines released (input, pull-up) before the MCU powers up. */
++	/*
++	 * Both lines released before the MCU powers up. RedMagic v186: as Android has them then (the bus suspended:
++	 * live.dts qupv3_se16_i2c_sleep, function gpio, no pull); the GENI init gives them to qup16 with pull-ups.
++	 */
++	rm_fan_reset_dump("at entry");
 +	mondrian_tlmm_write_raw(rm_fan_sda, MONDRIAN_TLMM_CFG,
-+	    mondrian_tlmm_cfg(0, MONDRIAN_TLMM_PULL_UP, MONDRIAN_TLMM_DRIVE_2MA, 0));
++	    mondrian_tlmm_cfg(0, MONDRIAN_TLMM_PULL_NONE, MONDRIAN_TLMM_DRIVE_2MA, 0));
 +	mondrian_tlmm_write_raw(rm_fan_scl, MONDRIAN_TLMM_CFG,
-+	    mondrian_tlmm_cfg(0, MONDRIAN_TLMM_PULL_UP, MONDRIAN_TLMM_DRIVE_2MA, 0));
++	    mondrian_tlmm_cfg(0, MONDRIAN_TLMM_PULL_NONE, MONDRIAN_TLMM_DRIVE_2MA, 0));
 +	/*
 +	 * Nubia's order (fan_core.c fan_set_enable): power on, reset low
 +	 * 100 ms, reset high, 100 ms. The shim already released the reset
@@ -6676,15 +7190,33 @@ index 000000000..375cca0c8
 +	 */
 +	{
 +		int rl = rm_fan_reset_line(0);
++		int pl = rm_fan_reset_level();
++		int rr = mondrian_rpmh_rail("ldoc11", 3312, 1);
 +
-+		(void)mondrian_rpmh_rail("ldoc11", 3312, 1);
-+		delay(100000);
++		mondrian_spi_delay(100000000u);   /* 100 ms (v185: delay() returns at once on this board) */
 +		int rh = rm_fan_reset_line(1);
++		int ph = rm_fan_reset_level();
 +
-+		printf("RM FAN: reset low %d, ldoc11 on, reset high %d\n", rl, rh);
++		printf("RM FAN: reset low rc %d (pad reads %d), ldoc11 on rc %d, reset high rc %d (pad reads %d)\n",
++		    rl, pl, rr, rh, ph);
++		rm_fan_reset_dump("after release");
 +	}
-+	delay(300000);          /* MCU boot */
-+	{
++	mondrian_spi_delay(300000000u);   /* MCU boot, 300 ms (v185: delay() does not wait here) */
++	rm_fan_geni = rm_fan_geni_init() == 0;
++	if (rm_fan_geni) {
++		uint8_t ver[2];
++		int ms = rm_fan_wait_answer(ver);
++
++		if (ms < 0) {
++			printf("RM FAN: the MCU did not answer for a second after its boot\n");
++			rm_fan_boot_loader_probe();
++			ms = rm_fan_wait_answer(ver);
++		}
++		printf("RM FAN: MCU answer after %d ms more: firmware version %u (Android: 5)\n", ms,
++		    (unsigned)(ver[0] | ver[1] << 8));
++		mondrian_log_flush_now();
++	}
++	if (!rm_fan_geni) {
 +		/* Diagnostics: line levels, bus recovery, slow clock, address scan. */
 +		vm_offset_t sda = rm_sda, scl = rm_scl;
 +		uint32_t half = rm_i2c_half;
@@ -6753,13 +7285,21 @@ index 000000000..375cca0c8
 +		    rm_fan_temp / 10, rm_fan_temp % 10);
 +	} else {
 +		/* one retry after a longer wait, in case the MCU boots slowly */
-+		delay(500000);
++		mondrian_spi_delay(500000000u);
 +		if (rm_fan_set(rm_fan_duty_for(rm_fan_temp)) == 0) {
 +			printf("RM FAN: MCU acked on retry, duty %d%%\n", rm_fan_duty);
 +		} else {
 +			printf("RM FAN: no ACK from 0x%x (reset not released?)\n",
 +			    RM_FAN_I2C_ADDR);
 +		}
++	}
++	if (rm_fan_geni) {
++		/* what the MCU says of itself (fan_core.c, two bytes each: 0x07 temperature, 0x06 current) */
++		uint8_t temp[2] = { 0xee, 0xee }, cur[2] = { 0xee, 0xee };
++		int rt = rm_fan_geni_read(RM_FAN_I2C_ADDR, 0x07, temp, 2);
++		int rc = rm_fan_geni_read(RM_FAN_I2C_ADDR, 0x06, cur, 2);
++		printf("RM FAN: MCU temperature reading %u (rc %d; Android showed 389-407), current %u (rc %d)\n",
++		    (unsigned)(temp[0] | temp[1] << 8), rt, (unsigned)(cur[0] | cur[1] << 8), rc);
 +	}
 +	mondrian_log_flush_now();
 +}
@@ -6960,6 +7500,39 @@ index 000000000..375cca0c8
 +/* Reports read since boot, for the fps line; and the vsync kick below. */
 +static uint32_t mondrian_touch_reports_read;
 +static uint32_t mondrian_touch_polls;
++/*
++ * RedMagic v188: reports with the part's touch-event flag (head byte 0 bit 7, goodix brl GOODIX_TOUCH_EVENT) and
++ * reads that found none: a read between two of the part's scans got the last report again (only byte 0 is cleared
++ * after a read), a sample with no movement and then a double step. Once the flag has been seen 20 times, a read
++ * without it is skipped.
++ */
++static uint32_t mondrian_touch_fresh, mondrian_touch_stale;
++/* v200: report checksums (on until shown not to apply) and what the reports said, logged every ~5 s */
++static int rm_tc_on = 1;
++static uint32_t rm_tc_good, rm_tc_bad_head, rm_tc_bad_points, rm_tc_finger_reports, rm_tc_downs, rm_tc_ups;
++/*
++ * RedMagic v203: is a finger on the glass, or was one in the last 300 ms? The framebuffer's touch timer reads four
++ * times a frame then. The v202 timeline: the part scans at 120 Hz (head byte 1, its frame counter, went up by 2
++ * between our fresh reads), and reads twice a frame, at its own rate, saw every other frame: a fast flick (~50 ms on
++ * the glass) arrived as 2-3 points, and some as 2 points 20-40 px apart -- a tap to UIKit.
++ */
++static uint64_t rm_touch_finger_at;
++int mondrian_touch_active(void);
++int
++mondrian_touch_active(void)
++{
++	uint64_t window = 0;
++	nanoseconds_to_absolutetime(300000000ull, &window);
++	return rm_touch_finger_at != 0 && mach_absolute_time() - rm_touch_finger_at < window;
++}
++
++uint32_t mondrian_touch_stale_count(void);
++extern void mondrian_cpufreq_touch(void);
++uint32_t
++mondrian_touch_stale_count(void)
++{
++	return mondrian_touch_stale;
++}
 +
 +uint32_t
 +mondrian_touch_report_count(void)
@@ -7401,15 +7974,93 @@ index 000000000..375cca0c8
 +	return -1;
 +}
 +
++/*
++ * RedMagic v204: a six-byte command (two data bytes), as Nubia's sysfs stores send them (goodix_core.ko
++ * gsx_nubia_highrate_store: len 6, cmd 0x1a, data 1/0; gsx_nubia_game_store: cmd 0xc2), the checksum over bytes
++ * 2..5 in 6..7 (brl_send_cmd's goodix_append_checksum). Its waits spin on the counter (delay() does not wait here).
++ * Returns 0 on CMD_ACK_OK (0x80), -2 on a checksum error (0x04) or an unknown ack, -1 when it stayed busy
++ * (0x00 none yet, 0x01 idle, 0x02 busy, 0x03 buffer overflow: polled again).
++ */
++static int
++mondrian_touch_send_cmd2(uint8_t cmd, uint8_t data0, uint8_t data1)
++{
++	uint8_t buf[16];
++	uint32_t i, sum = 0;
++
++	if (mondrian_touch_cmd_addr == 0) {
++		return -1;
++	}
++	for (i = 0; i < sizeof(buf); i++) {
++		buf[i] = 0;
++	}
++	buf[2] = 6;
++	buf[3] = cmd;
++	buf[4] = data0;
++	buf[5] = data1;
++	for (i = 2; i < 6; i++) {
++		sum += buf[i];
++	}
++	buf[6] = (uint8_t)(sum & 0xff);
++	buf[7] = (uint8_t)((sum >> 8) & 0xff);
++	for (int attempt = 0; attempt < 3; attempt++) {
++		if (mondrian_fw_write_big(mondrian_touch_cmd_addr, buf, sizeof(buf)) < 0) {
++			continue;
++		}
++		for (int tries = 0; tries < 10; tries++) {
++			uint8_t ack[16];
++			mondrian_spi_delay(1000000u);           /* 1 ms */
++			(void)mondrian_goodix_read(mondrian_touch_cmd_addr, ack, sizeof(ack));
++			if (ack[1] == 0x80) {
++				mondrian_spi_delay(40000000u);  /* 40 ms: the part settles (brl_send_cmd) */
++				return 0;
++			}
++			if (ack[1] == 0x04 || ack[1] > 0x04) {          /* 0x04 checksum error, or unknown: refused */
++				printf("MONDRIAN TOUCH: command %#x ack %#x\n", cmd, ack[1]);
++				return -2;
++			}
++		}
++	}
++	return -1;
++}
++
 +static int
 +mondrian_touch_coor_mode(void)
 +{
-+	if (mondrian_touch_send_cmd(0x90, 0x00) < 0 ||
-+	    mondrian_touch_send_cmd(0x91, 0x81) < 0) {
++	/*
++	 * RedMagic v206: the RedMagic's part (GT9897) is not sent 0x90/0x91 unless rmtcoor=1. Nubia's own driver
++	 * (goodix_core.ko) has no coordinate-mode command at all -- the part reports points by default; these two came
++	 * from another Mondrian board's Goodix code, and what this firmware makes of 0x91 0x81 is unknown. Under them a
++	 * fast swipe's first 40-60 ms stayed at the landing point (v204/v205 timelines), which Android never shows.
++	 */
++	int coor = rm_touch ? 0 : 1;
++	PE_parse_boot_argn("rmtcoor", &coor, sizeof(coor));
++	if (coor && (mondrian_touch_send_cmd(0x90, 0x00) < 0 ||
++	    mondrian_touch_send_cmd(0x91, 0x81) < 0)) {
 +		printf("MONDRIAN TOUCH: coordinate mode failed\n");
 +		return -1;
 +	}
-+	printf("MONDRIAN TOUCH: coordinate mode enabled\n");
++	printf("MONDRIAN TOUCH: coordinate mode %s\n", coor ? "enabled (0x90 00, 0x91 81)" : "left at the part's default (no 0x90/0x91)");
++	{
++		/*
++		 * RedMagic v204: the part's high report rate, as Android's driver sets it. At power-on defaults it
++		 * reports 60 times a second (a 120 Hz scan, every other frame) through its smoothing filter, and a fast
++		 * flick came through as 2 points 20-40 px apart, a tap (v202/v203 timelines). Boot-arg rmthigh=0 leaves
++		 * it off. v205: Nubia's game mode (0xc2) too, rmtgame=0 leaves it off: with the high rate alone the part
++		 * still held a touch at its landing point for 40-60 ms of a fast swipe, then let it go and reported a
++		 * "new" finger further along (ring222) -- one swipe as two still taps.
++		 */
++		int high = 1, game = 1;     /* v205: game mode on by default: v204 still held the landing point and split fast swipes */
++		PE_parse_boot_argn("rmthigh", &high, sizeof(high));
++		PE_parse_boot_argn("rmtgame", &game, sizeof(game));
++		if (high) {
++			int rc = mondrian_touch_send_cmd2(0x1a, 1, 0);
++			printf("MONDRIAN TOUCH: high report rate (0x1a 01): %s (%d)\n", rc == 0 ? "on" : "NOT acked", rc);
++		}
++		if (game) {
++			int rc = mondrian_touch_send_cmd2(0xc2, 1, 0);
++			printf("MONDRIAN TOUCH: game mode (0xc2 01): %s (%d)\n", rc == 0 ? "on" : "NOT acked", rc);
++		}
++	}
 +	return 0;
 +}
 +
@@ -7438,15 +8089,90 @@ index 000000000..375cca0c8
 +		last_y[i] = 0;
 +	}
 +	for (;;) {
-+		(void)tsleep((caddr_t)&mondrian_touch_data_addr, PZERO - 1, "mtouch", 1);
++		/*
++		 * v188: woken twice a frame by the framebuffer's touch timer, just before a vsync and half a frame
++		 * earlier; the 1-tick timeout did fire and added a read 10 ms after each vsync wake (120 uneven reads a
++		 * second). Ten ticks now: only a fallback.
++		 */
++		(void)tsleep((caddr_t)&mondrian_touch_data_addr, PZERO - 1, "mtouch", 10);
 +		mondrian_touch_polls++;
 +		rm_fan_step();
 +		if (!mondrian_touch_poll &&
 +		    (mondrian_tlmm_read(mondrian_touch_irq_page, MONDRIAN_TLMM_IN_OUT) & 1) != 0) {
 +			continue;
 +		}
-+		(void)mondrian_goodix_read(mondrian_touch_data_addr, head, sizeof(head));
-+		mondrian_touch_reports_read++;
++		/*
++		 * RedMagic v200: the report read in one go (head and the first two points, as goodix_brl does: 26
++		 * bytes), and its checksums checked (each block's bytes summed, against the little-endian 16 bits after
++		 * it: brl checksum_cmp CHECKSUM_MODE_U8_LE). Polled, a read can land while the part rewrites the report:
++		 * head and points from two different scans, a finger that jumps or an id that is not there -- fast
++		 * swipes got lost. A bad report is read again once, then left for the next poll (not cleared). If none
++		 * of the first 50 reports checks out, the part does not checksum this way and the check goes off.
++		 */
++		{
++			static uint8_t frame[8 + MONDRIAN_TOUCH_FINGERS * MONDRIAN_TOUCH_POINT_LEN + 2];
++			int good = 0;
++
++			for (int attempt = 0; attempt < 2 && !good; attempt++) {
++				if (mondrian_goodix_read(mondrian_touch_data_addr, frame, 26) != 0) {
++					continue;
++				}
++				for (i = 0; i < sizeof(head); i++) {
++					head[i] = frame[i];
++				}
++				if (!(head[0] & 0x80)) {
++					break;          /* nothing new: the v188 stale check below */
++				}
++				if (rm_tc_on) {
++					uint32_t s = 0;
++					for (i = 0; i < 6; i++) s += head[i];
++					if ((s & 0xffffu) != (uint32_t)(head[6] | head[7] << 8)) {
++						rm_tc_bad_head++;
++						continue;
++					}
++				}
++				num = head[2] & 0x0f;
++				if (num > MONDRIAN_TOUCH_FINGERS) {
++					num = MONDRIAN_TOUCH_FINGERS;
++				}
++				const uint32_t need = 8u + (uint32_t)num * MONDRIAN_TOUCH_POINT_LEN + 2u;
++				if (num > 2 && mondrian_goodix_read(mondrian_touch_data_addr + 26, frame + 26, need - 26) != 0) {
++					continue;
++				}
++				if (rm_tc_on && num > 0) {
++					uint32_t s = 0;
++					const uint32_t n = (uint32_t)num * MONDRIAN_TOUCH_POINT_LEN;
++					for (i = 0; i < n; i++) s += frame[8 + i];
++					if ((s & 0xffffu) != (uint32_t)(frame[8 + n] | frame[8 + n + 1] << 8)) {
++						rm_tc_bad_points++;
++						continue;
++					}
++				}
++				good = 1;
++			}
++			mondrian_touch_reports_read++;
++			if (head[0] & 0x80) {
++				if (good) {
++					rm_tc_good++;
++				} else if (rm_tc_on && rm_tc_good == 0 && rm_tc_bad_head + rm_tc_bad_points >= 50) {
++					rm_tc_on = 0;
++					printf("RM TOUCH: no report checksums out (head %u, points %u bad): checks off\n",
++					    rm_tc_bad_head, rm_tc_bad_points);
++				}
++				if (!good && rm_tc_on) {
++					continue;       /* torn: read again at the next poll */
++				}
++			}
++			for (i = 0; i < sizeof(point_buf); i++) {
++				point_buf[i] = frame[8 + i < sizeof(frame) ? 8 + i : 0];
++			}
++		}
++		if (head[0] & 0x80) {
++			mondrian_touch_fresh++;
++		} else if (mondrian_touch_fresh >= 20) {
++			mondrian_touch_stale++;
++			continue;               /* v188: nothing new since the last read */
++		}
 +		num = head[2] & 0x0f;
 +		if (num > MONDRIAN_TOUCH_FINGERS) {
 +			num = MONDRIAN_TOUCH_FINGERS;
@@ -7455,11 +8181,8 @@ index 000000000..375cca0c8
 +			now[i] = 0;
 +		}
 +		if (num > 0) {
-+			for (i = 0; i < sizeof(point_buf); i++) {
-+				point_buf[i] = 0;
-+			}
-+			(void)mondrian_goodix_read(mondrian_touch_data_addr + sizeof(head),
-+			    point_buf, (uint32_t)(num * MONDRIAN_TOUCH_POINT_LEN + 2));
++			rm_tc_finger_reports++;
++			rm_touch_finger_at = mach_absolute_time();      /* v203 */
 +			for (point = 0; point < num; point++) {
 +				uint8_t *p = &point_buf[point * MONDRIAN_TOUCH_POINT_LEN];
 +				int id = (p[0] >> 4) & 0x0f;
@@ -7474,18 +8197,54 @@ index 000000000..375cca0c8
 +					x = x * 14400 / RM_TOUCH_MAX_X;
 +					y = y * 32000 / RM_TOUCH_MAX_Y;
 +				}
++				if (!was[id]) {
++					rm_tc_downs++;      /* v200 */
++				}
 +				now[id] = 1;
 +				last_x[id] = (int16_t)x;
 +				last_y[id] = (int16_t)y;
 +				mondrian_hid_touch(id, 1, x, y);
++				mondrian_cpufreq_touch();   /* v199: clocks up at once */
 +				if (reports < 30) {
 +					printf("MONDRIAN TOUCH: report %u finger %d %d,%d\n",
 +					    reports, id, x, y);
 +				}
 +			}
 +		}
++		/*
++		 * RedMagic v202: the touch timeline, 4000 lines at most: every report with a finger in it and the first one
++		 * without, each with the read time (ms since boot), the part's 8 head bytes and its points. A quick touch
++		 * after another still went missing in v201 (fresh identities, clean checksums, downs == ups): is the new
++		 * touch late, merged into the last one, or not reported at all?
++		 */
++		{
++			static uint32_t tt_lines;
++			int any_was = 0;
++			for (finger = 0; finger < MONDRIAN_TOUCH_FINGERS; finger++) any_was |= was[finger];
++			static int tt_max = -1;
++			if (tt_max < 0) {
++				tt_max = 0;     /* v207: off unless rmtt=N (lines) */
++				PE_parse_boot_argn("rmtt", &tt_max, sizeof(tt_max));
++			}
++			if ((num > 0 || any_was) && tt_lines < (uint32_t)tt_max) {
++				uint64_t ns = 0;
++				char line[200];
++				int k;
++				absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++				k = snprintf(line, sizeof(line), "TT %llu h=%02x%02x%02x%02x%02x%02x%02x%02x n=%d", ns / 1000000ull,
++				    head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7], num);
++				for (point = 0; point < num && point < 4 && k < (int)sizeof(line) - 24; point++) {
++					uint8_t *p = &point_buf[point * MONDRIAN_TOUCH_POINT_LEN];
++					k += snprintf(line + k, sizeof(line) - (size_t)k, " %d:%d,%d", (p[0] >> 4) & 0x0f,
++					    p[2] | (p[3] << 8), p[4] | (p[5] << 8));
++				}
++				printf("%s\n", line);
++				tt_lines++;
++			}
++		}
 +		for (finger = 0; finger < MONDRIAN_TOUCH_FINGERS; finger++) {
 +			if (was[finger] && !now[finger]) {
++				rm_tc_ups++;                    /* v200 */
 +				mondrian_hid_touch(finger, 0, last_x[finger], last_y[finger]);
 +				if (reports < 30) {
 +					printf("MONDRIAN TOUCH: report %u finger %d up\n",
@@ -7493,6 +8252,15 @@ index 000000000..375cca0c8
 +				}
 +			}
 +			was[finger] = now[finger];
++		}
++		static uint32_t tc_processed;
++		if ((++tc_processed % 300) == 0) {     /* fresh reports come ~60 a second: ~5 s */
++			static uint32_t g0, h0, p0, f0, d0, u0;
++			printf("RM TOUCH: 5 s: %u finger reports, %u downs, %u ups; checksums %s: %u good, %u bad head, %u bad points\n",
++			    rm_tc_finger_reports - f0, rm_tc_downs - d0, rm_tc_ups - u0, rm_tc_on ? "on" : "OFF", rm_tc_good - g0,
++			    rm_tc_bad_head - h0, rm_tc_bad_points - p0);
++			g0 = rm_tc_good; h0 = rm_tc_bad_head; p0 = rm_tc_bad_points;
++			f0 = rm_tc_finger_reports; d0 = rm_tc_downs; u0 = rm_tc_ups;
 +		}
 +		/* One zero byte at the report address clears it and releases IRQ. */
 +		(void)mondrian_goodix_write(mondrian_touch_data_addr, &zero, 1);
@@ -7822,10 +8590,10 @@ index 000000000..375cca0c8
 +}
 diff --git a/bsd/dev/mondrian_ufs.c b/bsd/dev/mondrian_ufs.c
 new file mode 100644
-index 000000000..70b2edfa6
+index 000000000..4642864ce
 --- /dev/null
 +++ b/bsd/dev/mondrian_ufs.c
-@@ -0,0 +1,1834 @@
+@@ -0,0 +1,1846 @@
 +/*
 + * MONDRIAN internal UFS root device (read/write).
 + *
@@ -9272,13 +10040,28 @@ index 000000000..70b2edfa6
 +	if (!PE_parse_boot_argn("mondrianreset", &seconds, sizeof(seconds)) || seconds <= 0) {
 +		return;
 +	}
++	/*
++	 * RedMagic v201: off unless rmresetok=1. The boot loader does not honour the reset, and when it fired at 600 s
++	 * this thread hung its CPU with interrupts off: the phone froze on the lock screen, hot (ring213); until then it
++	 * spun a whole core for ten minutes of every boot. When on, it sleeps (deadline sleeps fire; the spin was from
++	 * the days they were thought not to).
++	 */
++	{
++		int ok = 0;
++		PE_parse_boot_argn("rmresetok", &ok, sizeof(ok));
++		if (!ok) {
++			printf("MONDRIAN RESET: mondrianreset=%d ignored (rmresetok=1 to use it): the boot loader ignores it "
++			    "and a failed reset froze the phone\n", seconds);
++			return;
++		}
++	}
 +	printf("MONDRIAN RESET: fastboot in %d s\n", seconds);
-+	/* tsleep() deadlines do not fire on these boards: spin in 100 ms steps. */
-+	/* delay() can block on a timer deadline too: spin on the counter itself. */
 +	uint64_t step = 0;
 +	nanoseconds_to_absolutetime(100000000ULL, &step);
 +	for (int i = 0; i < seconds * 10; i++) {
 +		uint64_t until = mach_absolute_time() + step;
++		assert_wait_deadline((event_t)&mondrian_reset_thread, THREAD_UNINT, until);
++		thread_block(THREAD_CONTINUE_NULL);
 +		while (mach_absolute_time() < until) {
 +			__builtin_arm_yield();
 +		}
@@ -9292,11 +10075,8 @@ index 000000000..70b2edfa6
 +	mondrian_log_flush_now();
 +	mondrian_reset_to_bootloader();
 +	mondrian_log_flush_now();
-+	printf("MONDRIAN RESET: PSCI returned, hanging\n");
-+	(void)ml_set_interrupts_enabled(FALSE);
-+	for (;;) {
-+		;
-+	}
++	printf("MONDRIAN RESET: PSCI returned: carrying on (v201: no hang with interrupts off)\n");
++	mondrian_log_flush_now();
 +}
 +
 +/* Called from the UFS write path, which runs throughout the boot. */
@@ -9688,10 +10468,10 @@ index 000000000..a8d1df76c
 +};
 diff --git a/bsd/dev/rm_blob.c b/bsd/dev/rm_blob.c
 new file mode 100644
-index 000000000..da68293b5
+index 000000000..1ef06fb31
 --- /dev/null
 +++ b/bsd/dev/rm_blob.c
-@@ -0,0 +1,235 @@
+@@ -0,0 +1,266 @@
 +/*
 + * RedMagic 7: userland files carried in the kernel and written into the iOS root (boot-arg rmblob=1), so a
 + * userland test (e.g. the hakios-metal probe as /usr/libexec/mondrian-gpu-test.dylib) needs a flash of boot_a
@@ -9712,6 +10492,7 @@ index 000000000..da68293b5
 +#include <mach/mach_time.h>
 +#include <pexpert/pexpert.h>
 +#include <pexpert/device_tree.h>
++#include <sys/mount.h>
 +
 +void rm_blob_start(void);
 +
@@ -9853,6 +10634,35 @@ index 000000000..da68293b5
 +	mondrian_log_flush_now();
 +}
 +
++/*
++ * RedMagic v180: jailbreak diagnostics, the kernel's side: code-signing enforcement as built and as the boot line
++ * left it, and every mount with its flags (is the root writable, is /private/var its own volume, nosuid).
++ * ca-watch (redmagic7/gpu/ca-watch.c, JB lines) tests the same from userland.
++ */
++extern int cs_system_enforcement_enable, cs_process_enforcement_enable, cs_library_val_enable, cs_debug;
++
++static int
++rm_jb_mount(mount_t mp, __unused void *arg)
++{
++	struct vfsstatfs *sf = vfs_statfs(mp);
++	uint64_t flags = vfs_flags(mp);
++
++	printf("RM JB: mount %s on %s (%s)%s%s%s%s\n", sf->f_mntfromname, sf->f_mntonname, sf->f_fstypename,
++	    (flags & MNT_RDONLY) ? " read-only" : " read-write", (flags & MNT_ROOTFS) ? " ROOTFS" : "",
++	    (flags & MNT_NOSUID) ? " nosuid" : "", (flags & MNT_NOEXEC) ? " noexec" : "");
++	return VFS_RETURNED;
++}
++
++static void
++rm_jb_report(void)
++{
++	printf("RM JB: code signing: system enforcement %d, process enforcement %d, library validation %d, cs_debug %d\n",
++	    cs_system_enforcement_enable, cs_process_enforcement_enable, cs_library_val_enable, cs_debug);
++	printf("RM JB: boot line: %s\n", PE_boot_args());
++	vfs_iterate(0, rm_jb_mount, NULL);
++	mondrian_log_flush_now();
++}
++
 +static void
 +rm_blob_thread(__unused void *arg, __unused wait_result_t wr)
 +{
@@ -9883,6 +10693,7 @@ index 000000000..da68293b5
 +		    error == 0 ? "written" : "NOT written", tries + 1, error);
 +		mondrian_log_flush_now();
 +	}
++	rm_jb_report();         /* v180: the root is writable by now (the writes above waited for it) */
 +}
 +
 +void
@@ -9927,12 +10738,424 @@ index 000000000..da68293b5
 +	return NULL;
 +}
 +#endif
+diff --git a/bsd/dev/rm_fan_geni.c b/bsd/dev/rm_fan_geni.c
+new file mode 100644
+index 000000000..23e586366
+--- /dev/null
++++ b/bsd/dev/rm_fan_geni.c
+@@ -0,0 +1,406 @@
++/*
++ * RedMagic 7 (v185): the fan MCU's I2C bus through its own GENI serial engine, QUP wrapper 2 SE1 at 0x884000
++ * (Android: qupv3_se16_i2c, i2c@884000, qcom,i2c-geni; pins gpio60 SDA / gpio61 SCL, function qup16; the MCU at
++ * 0x2a). The bit-banged bus in mondrian_touch.c never got an ACK from the MCU; this drives the engine the way Linux's
++ * i2c-qcom-geni.c does, polled (FIFO mode, no interrupts):
++ *
++ *   clocks: GCC vote 0x62010 bits 0 core, 1 s_ahb, 2 m_ahb, 3 core_2x, 5 s1 (gcc-sm8450.c); s1 CBCR +0x2e140, RCG
++ *           +0x2e148 at 19.2 MHz (XO); a hardware-gated branch (HW_CTL) is let run, as rm_bt.c does for s_ahb;
++ *   SE:     FIFO mode, packing 8 bits x 4 per word MSB first on the wire (geni_se_config_packing(8, 4, true, ...)),
++ *           100 kHz from 19.2 MHz (clk_div 7; SCL counters high 10, low 12, cycle 26), M_CMD I2C_WRITE (1) / I2C_READ
++ *           (2) with the 7-bit address at bit 9; a NACK is M_GP_IRQ_1 (bit 10).
++ *
++ * Every wait spins on mach_absolute_time (delay() does not wait on this board). Only 4 KiB pages are mapped. The
++ * caller (mondrian_touch.c, its touch thread) is the only user, so transfers never overlap. Bluetooth stage A
++ * (rm_bt.c) also sets QUP2 votes in 0x62010 later in the boot; each side only ever adds its own bits.
++ */
++#include <pexpert/arm64/board_config.h>
++#if defined(MONDRIAN)
++#include <stdbool.h>
++#include <stdint.h>
++#include <kern/clock.h>
++#include <mach/mach_time.h>
++#include <libkern/libkern.h>
++#include <sys/systm.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++extern void mondrian_log_flush_now(void);
++
++int rm_fan_geni_init(void);
++int rm_fan_geni_write(uint8_t addr, const uint8_t *buf, uint32_t len);
++int rm_fan_geni_read(uint8_t addr, uint8_t reg, uint8_t *out, uint32_t len);
++
++#define GCC                     0x00100000u
++#define GCC_VOTE                (GCC + 0x62010u)
++#define VOTE_FAN                ((1u << 0) | (1u << 1) | (1u << 2) | (1u << 3) | (1u << 5))
++#define CBCR_CORE               (GCC + 0x33280u)
++#define CBCR_CORE2X             (GCC + 0x3328cu)
++#define CBCR_M_AHB              (GCC + 0x2e004u)
++#define CBCR_S_AHB              (GCC + 0x2e008u)
++#define CBCR_S1                 (GCC + 0x2e140u)
++#define CBCR_OFF                (1u << 31)
++#define CBCR_HW_CTL             (1u << 1)
++#define RCG_S1                  (GCC + 0x2e148u)
++#define RCG_CMD_UPDATE          (1u << 0)
++#define RCG_CFG                 0x4u
++#define RCG_M                   0x8u
++#define RCG_N                   0xcu
++#define RCG_D                   0x10u
++#define RCG_DFSR                0x14u
++#define RCG_PERF_DFSR(l)        (0x1cu + 4u * (l))
++#define RCG_LEVELS              8u
++#define TLMM(n)                 (0x0f100000u + (uint32_t)(n) * 0x1000u)
++#define PIN_SDA                 60u
++#define PIN_SCL                 61u
++#define FUNC_QUP16              1u
++#define SE                      0x00884000u
++
++#define GENI_FORCE_DEFAULT      0x020u
++#define GENI_OUTPUT_CTRL        0x024u
++#define GENI_CGC_CTRL           0x028u
++#define GENI_STATUS             0x040u
++#define GENI_SER_M_CLK_CFG      0x048u
++#define GENI_IF_DISABLE_RO      0x064u
++#define GENI_FW_REVISION_RO     0x068u
++#define GENI_CLK_SEL            0x07cu
++#define GENI_DMA_MODE_EN        0x258u
++#define GENI_TX_PACKING_CFG0    0x260u
++#define GENI_TX_PACKING_CFG1    0x264u
++#define SE_I2C_TX_TRANS_LEN     0x26cu
++#define SE_I2C_RX_TRANS_LEN     0x270u
++#define SE_I2C_SCL_COUNTERS     0x278u
++#define GENI_RX_PACKING_CFG0    0x284u
++#define GENI_RX_PACKING_CFG1    0x288u
++#define GENI_M_CMD0             0x600u
++#define GENI_M_CMD_CTRL         0x604u
++#define GENI_M_IRQ_STATUS       0x610u
++#define GENI_M_IRQ_EN           0x614u
++#define GENI_M_IRQ_CLEAR        0x618u
++#define GENI_S_IRQ_EN           0x644u
++#define GENI_S_IRQ_CLEAR        0x648u
++#define GENI_TX_FIFO            0x700u
++#define GENI_RX_FIFO            0x780u
++#define GENI_TX_FIFO_STATUS     0x800u
++#define GENI_RX_FIFO_STATUS     0x804u
++#define GENI_TX_WATERMARK       0x80cu
++#define GENI_RX_WATERMARK       0x810u
++#define GENI_RX_RFR_WATERMARK   0x814u
++#define SE_GSI_EVENT_EN         0xe18u
++#define SE_IRQ_EN               0xe1cu
++#define SE_HW_PARAM_0           0xe24u
++#define SE_DMA_GENERAL_CFG      0xe30u
++#define DMA_TX_IRQ_CLR          0xc44u
++#define DMA_RX_IRQ_CLR          0xd44u
++
++#define PROTO_I2C               3u
++#define M_CMD_DONE              (1u << 0)
++#define M_CMD_OVERRUN           (1u << 1)
++#define M_ILLEGAL_CMD           (1u << 2)
++#define M_CMD_FAILURE           (1u << 3)
++#define M_CMD_CANCEL            (1u << 4)
++#define M_CMD_ABORT             (1u << 5)
++#define M_GP_IRQ_1_NACK         (1u << 10)
++#define M_GP_IRQ_3_BUS          (1u << 12)
++#define M_GP_IRQ_4_ARB          (1u << 13)
++#define M_ERRORS                (M_CMD_OVERRUN | M_ILLEGAL_CMD | M_CMD_FAILURE | M_GP_IRQ_1_NACK | M_GP_IRQ_3_BUS | M_GP_IRQ_4_ARB)
++#define CMD_CTRL_ABORT          (1u << 1)
++#define CMD_CTRL_CANCEL         (1u << 2)
++#define I2C_WRITE               1u
++#define I2C_READ                2u
++#define STOP_STRETCH            (1u << 2)
++
++static struct {
++	uint32_t page[16];
++	vm_offset_t va[16];
++	unsigned n;
++	bool ready;
++	uint32_t writes, nacks, errors;
++} fg;
++
++/* the kernel address of one register, its 4 KiB page mapped the first time it is reached; 0 when it cannot be */
++static vm_offset_t
++fg_reg(uint32_t a)
++{
++	uint32_t page = a & ~0xfffu;
++	for (unsigned i = 0; i < fg.n; i++) {
++		if (fg.page[i] == page) {
++			return fg.va[i] + (a & 0xfffu);
++		}
++	}
++	if (fg.n >= 16) {
++		return 0;
++	}
++	vm_offset_t va = ml_io_map(page, 0x1000);
++	if (va == 0) {
++		return 0;
++	}
++	fg.page[fg.n] = page;
++	fg.va[fg.n] = va;
++	fg.n++;
++	return va + (a & 0xfffu);
++}
++
++static uint32_t
++rd(uint32_t a)
++{
++	vm_offset_t v = fg_reg(a);
++	return v ? *(volatile uint32_t *)v : 0xffffffffu;
++}
++
++static void
++wr(uint32_t a, uint32_t value)
++{
++	vm_offset_t v = fg_reg(a);
++	if (v) {
++		*(volatile uint32_t *)v = value;
++		__asm__ volatile ("dsb sy" ::: "memory");
++	}
++}
++
++static void
++fg_spin_us(uint32_t us)
++{
++	uint64_t ticks = 0, end;
++	nanoseconds_to_absolutetime((uint64_t)us * 1000u, &ticks);
++	end = mach_absolute_time() + ticks;
++	while (mach_absolute_time() < end) {
++		__asm__ volatile ("yield");
++	}
++}
++
++static bool
++fg_wait(uint32_t reg, uint32_t mask, uint32_t want, uint32_t us)
++{
++	for (uint32_t t = 0; t <= us; t += 10) {
++		if ((rd(reg) & mask) == want) {
++			return true;
++		}
++		fg_spin_us(10);
++	}
++	return false;
++}
++
++static bool
++fg_branch_on(const char *name, uint32_t reg)
++{
++	if (fg_wait(reg, CBCR_OFF, 0, 20000)) {
++		return true;
++	}
++	uint32_t v = rd(reg);
++	if (v & CBCR_HW_CTL) {
++		wr(reg, v & ~CBCR_HW_CTL);       /* a hardware-gated branch: let it run, as rm_bt.c does */
++		if (fg_wait(reg, CBCR_OFF, 0, 20000)) {
++			printf("RM FAN: GENI %s on after clearing HW_CTL (CBCR %#x)\n", name, rd(reg));
++			return true;
++		}
++	}
++	printf("RM FAN: GENI %s does NOT come on (CBCR %#x)\n", name, rd(reg));
++	return false;
++}
++
++/* the s1 clock at 19.2 MHz: a DFS level that already is XO, or the RCG programmed to XO / 1 */
++static bool
++fg_clock_19p2(void)
++{
++	if (rd(RCG_S1 + RCG_DFSR) & 1u) {
++		for (uint32_t l = 0; l < RCG_LEVELS; l++) {
++			uint32_t cfg = rd(RCG_S1 + RCG_PERF_DFSR(l));
++			/* source 0 (XO), half-integer divider 1 (= / 1) or 0 (bypass), no M/N */
++			if (((cfg >> 8) & 7u) == 0 && (cfg & 0x1fu) <= 1u && ((cfg >> 12) & 3u) == 0) {
++				wr(SE + GENI_CLK_SEL, l);
++				printf("RM FAN: GENI s1 clock: DFS level %u = 19.2 MHz (cfg %#x)\n", l, cfg);
++				return true;
++			}
++		}
++		printf("RM FAN: GENI s1 clock: DFS on, no 19.2 MHz level\n");
++		return false;
++	}
++	uint32_t cfg = rd(RCG_S1 + RCG_CFG) & ~(0x1fu | 7u << 8 | 3u << 12);
++	wr(RCG_S1 + RCG_M, 0);
++	wr(RCG_S1 + RCG_N, 0);
++	wr(RCG_S1 + RCG_D, 0);
++	wr(RCG_S1 + RCG_CFG, cfg | 1u);          /* XO, divide by 1, no M/N */
++	wr(RCG_S1, rd(RCG_S1) | RCG_CMD_UPDATE);
++	bool ok = fg_wait(RCG_S1, RCG_CMD_UPDATE, 0, 20000);
++	wr(SE + GENI_CLK_SEL, 0);
++	printf("RM FAN: GENI s1 clock: RCG cfg %#x -> 19.2 MHz (update %s)\n", rd(RCG_S1 + RCG_CFG), ok ? "done" : "NOT done");
++	return ok;
++}
++
++static void
++fg_cancel(void)
++{
++	wr(SE + GENI_M_CMD_CTRL, CMD_CTRL_CANCEL);
++	if (!fg_wait(SE + GENI_M_IRQ_STATUS, M_CMD_CANCEL, M_CMD_CANCEL, 2000)) {
++		wr(SE + GENI_M_CMD_CTRL, CMD_CTRL_ABORT);
++		(void)fg_wait(SE + GENI_M_IRQ_STATUS, M_CMD_ABORT, M_CMD_ABORT, 2000);
++	}
++	wr(SE + GENI_M_IRQ_CLEAR, 0xffffffffu);
++}
++
++int rm_fan_geni_read_raw(uint8_t addr, uint8_t *out, uint32_t len);
++
++int
++rm_fan_geni_init(void)
++{
++	uint32_t vote = rd(GCC_VOTE);
++
++	if (vote == 0xffffffffu) {
++		printf("RM FAN: GENI: GCC not mapped\n");
++		return -1;
++	}
++	if ((vote & VOTE_FAN) != VOTE_FAN) {
++		wr(GCC_VOTE, vote | VOTE_FAN);
++	}
++	printf("RM FAN: GENI: GCC vote %#x -> %#x\n", vote, rd(GCC_VOTE));
++	if (!fg_branch_on("wrap2 core", CBCR_CORE) || !fg_branch_on("wrap2 core_2x", CBCR_CORE2X) ||
++	    !fg_branch_on("wrap_2 m_ahb", CBCR_M_AHB) || !fg_branch_on("wrap_2 s_ahb", CBCR_S_AHB)) {
++		return -1;
++	}
++	if (!fg_clock_19p2() || !fg_branch_on("wrap2 s1", CBCR_S1)) {
++		return -1;
++	}
++	uint32_t fw = rd(SE + GENI_FW_REVISION_RO), proto = (fw >> 8) & 0xffu, ifd = rd(SE + GENI_IF_DISABLE_RO);
++	uint32_t p0 = rd(SE + SE_HW_PARAM_0), tx_depth = (p0 >> 16) & 0xffu;
++	printf("RM FAN: GENI SE1 @0x884000: FW revision %#x (protocol %u: 3 = I2C), IF_DISABLE %#x, status %#x, TX FIFO %u "
++	    "words\n", fw, proto, ifd, rd(SE + GENI_STATUS), tx_depth);
++	if (proto != PROTO_I2C || (ifd & 1u)) {
++		/* the pins stay GPIOs, for the bit-banged bus */
++		printf("RM FAN: GENI: SE1 is not an I2C engine with FIFOs; not used\n");
++		return -1;
++	}
++	/* pins: function qup16, pull-up, 2 mA (live.dts qupv3_se16_i2c_active); only once the engine is known good */
++	wr(TLMM(PIN_SDA), FUNC_QUP16 << 2 | 3u);
++	wr(TLMM(PIN_SCL), FUNC_QUP16 << 2 | 3u);
++	printf("RM FAN: GENI: gpio60/61 to qup16: cfg %#x %#x\n", rd(TLMM(PIN_SDA)), rd(TLMM(PIN_SCL)));
++	if (rd(SE + GENI_STATUS) & 1u) {
++		fg_cancel();
++	}
++	/* geni_se_init + select FIFO mode, polled */
++	wr(SE + SE_GSI_EVENT_EN, 0);
++	wr(SE + GENI_M_IRQ_CLEAR, 0xffffffffu);
++	wr(SE + GENI_S_IRQ_CLEAR, 0xffffffffu);
++	wr(SE + DMA_TX_IRQ_CLR, 0xffffffffu);
++	wr(SE + DMA_RX_IRQ_CLR, 0xffffffffu);
++	wr(SE + GENI_CGC_CTRL, rd(SE + GENI_CGC_CTRL) | 0x7fu);
++	wr(SE + SE_DMA_GENERAL_CFG, rd(SE + SE_DMA_GENERAL_CFG) | 0xfu);
++	wr(SE + GENI_OUTPUT_CTRL, 0x7fu);
++	wr(SE + GENI_FORCE_DEFAULT, 1u);
++	wr(SE + SE_IRQ_EN, rd(SE + SE_IRQ_EN) | 0xfu);
++	wr(SE + GENI_DMA_MODE_EN, rd(SE + GENI_DMA_MODE_EN) & ~1u);
++	wr(SE + GENI_M_IRQ_EN, 0);
++	wr(SE + GENI_S_IRQ_EN, 0);
++	wr(SE + GENI_RX_WATERMARK, 1u);
++	wr(SE + GENI_RX_RFR_WATERMARK, tx_depth > 2 ? tx_depth - 1u : 1u);
++	wr(SE + GENI_TX_WATERMARK, 0);
++	/* 8 bits, 4 per word, MSB first on the wire (i2c-qcom-geni.c: geni_se_config_packing(8, 4, true, true, true)) */
++	wr(SE + GENI_TX_PACKING_CFG0, 0x7f8feu);
++	wr(SE + GENI_TX_PACKING_CFG1, 0xffefeu);
++	wr(SE + GENI_RX_PACKING_CFG0, 0x7f8feu);
++	wr(SE + GENI_RX_PACKING_CFG1, 0xffefeu);
++	/* 100 kHz from 19.2 MHz: clk_div 7, SCL high 10, low 12, cycle 26 (geni_i2c_clk_map_19p2mhz) */
++	wr(SE + GENI_SER_M_CLK_CFG, 7u << 4 | 1u);
++	wr(SE + SE_I2C_SCL_COUNTERS, 10u << 20 | 12u << 10 | 26u);
++	fg.ready = true;
++	printf("RM FAN: GENI I2C ready: 100 kHz, FIFO mode, polled\n");
++	mondrian_log_flush_now();
++	return 0;
++}
++
++/* the end of an M command: 0, or EIO-like codes: -2 NACK, -3 bus/arbitration, -4 other error, -5 timeout */
++static int
++fg_finish(const char *what)
++{
++	uint32_t st = 0;
++	for (uint32_t t = 0; t < 50000; t += 10) {       /* 50 ms: two bytes at 100 kHz take ~0.3 ms */
++		st = rd(SE + GENI_M_IRQ_STATUS);
++		if (st & (M_CMD_DONE | M_ERRORS)) {
++			break;
++		}
++		fg_spin_us(10);
++	}
++	int rc = (st & M_GP_IRQ_1_NACK) ? -2 : (st & (M_GP_IRQ_3_BUS | M_GP_IRQ_4_ARB)) ? -3 : (st & M_ERRORS) ? -4 :
++	    (st & M_CMD_DONE) ? 0 : -5;
++	if (rc != 0) {
++		if (rc == -2) {
++			fg.nacks++;
++		} else {
++			fg.errors++;
++		}
++		if (fg.nacks + fg.errors <= 8) {
++			printf("RM FAN: GENI %s: %s (M_IRQ %#x, status %#x)\n", what, rc == -2 ? "NACK" : rc == -3 ?
++			    "bus error / arbitration lost" : rc == -4 ? "command error" : "TIMEOUT", st, rd(SE + GENI_STATUS));
++		}
++		if (!(st & M_CMD_DONE)) {
++			fg_cancel();
++		}
++	}
++	wr(SE + GENI_M_IRQ_CLEAR, 0xffffffffu);
++	return rc;
++}
++
++int
++rm_fan_geni_write(uint8_t addr, const uint8_t *buf, uint32_t len)
++{
++	if (!fg.ready || len == 0 || len > 64) {
++		return -1;
++	}
++	wr(SE + GENI_M_IRQ_CLEAR, 0xffffffffu);
++	wr(SE + SE_I2C_TX_TRANS_LEN, len);
++	wr(SE + GENI_M_CMD0, I2C_WRITE << 27 | (uint32_t)addr << 9);
++	for (uint32_t i = 0; i < len; i += 4) {
++		uint32_t w = 0;
++		for (uint32_t b = 0; b < 4 && i + b < len; b++) {
++			w |= (uint32_t)buf[i + b] << (8u * b);
++		}
++		wr(SE + GENI_TX_FIFO, w);
++	}
++	fg.writes++;
++	return fg_finish("write");
++}
++
++/* one register read: the register's byte written without a stop, then `len` bytes read */
++int
++rm_fan_geni_read(uint8_t addr, uint8_t reg, uint8_t *out, uint32_t len)
++{
++	if (!fg.ready || len == 0 || len > 16) {
++		return -1;
++	}
++	wr(SE + GENI_M_IRQ_CLEAR, 0xffffffffu);
++	wr(SE + SE_I2C_TX_TRANS_LEN, 1);
++	wr(SE + GENI_M_CMD0, I2C_WRITE << 27 | (uint32_t)addr << 9 | STOP_STRETCH);
++	wr(SE + GENI_TX_FIFO, reg);
++	int rc = fg_finish("read (register)");
++	if (rc != 0) {
++		return rc;
++	}
++	return rm_fan_geni_read_raw(addr, out, len);
++}
++
++/*
++ * RedMagic v186: a plain read, no register byte first (fan_core.c fan_i2c_firmware_read: the MCU boot loader's
++ * prompt), and the second half of the register read above.
++ */
++int
++rm_fan_geni_read_raw(uint8_t addr, uint8_t *out, uint32_t len)
++{
++	if (!fg.ready || len == 0 || len > 16) {
++		return -1;
++	}
++	wr(SE + GENI_M_IRQ_CLEAR, 0xffffffffu);
++	wr(SE + SE_I2C_RX_TRANS_LEN, len);
++	wr(SE + GENI_M_CMD0, I2C_READ << 27 | (uint32_t)addr << 9);
++	int rc = fg_finish("read");
++	if (rc != 0) {
++		return rc;
++	}
++	uint32_t got = 0, words = rd(SE + GENI_RX_FIFO_STATUS) & 0x1ffffffu;
++	for (uint32_t i = 0; i < words && i < 8 && got < len; i++) {
++		uint32_t w = rd(SE + GENI_RX_FIFO);
++		for (uint32_t b = 0; b < 4 && got < len; b++) {
++			out[got++] = (uint8_t)(w >> (8u * b));
++		}
++	}
++	return got == len ? 0 : -6;
++}
++#endif /* MONDRIAN */
 diff --git a/bsd/dev/rmwifi/hakios.apple80211.c b/bsd/dev/rmwifi/hakios.apple80211.c
 new file mode 100644
-index 000000000..9f3e2a66c
+index 000000000..37a9123f6
 --- /dev/null
 +++ b/bsd/dev/rmwifi/hakios.apple80211.c
-@@ -0,0 +1,762 @@
+@@ -0,0 +1,831 @@
 +/*
 + * Darwin-on-hakios: Apple80211, answered in the kernel.
 + *
@@ -9967,6 +11190,9 @@ index 000000000..9f3e2a66c
 + * 1 success, 21 "invalid PMK" (a wrong passphrase), 9 a timeout, 2 anything else.
 + */
 +#include <kern/kalloc.h>
++#include <kern/sched_prim.h>
++#include <kern/thread.h>
++#include <mach/mach_time.h>
 +#include <kern/locks.h>
 +#include <libkern/libkern.h>
 +#include <sys/errno.h>
@@ -10131,7 +11357,13 @@ index 000000000..9f3e2a66c
 +
 +/* Apple80211's events (APPLE80211_M_...) */
 +enum { EVENT_POWER_CHANGED = 1, EVENT_SSID_CHANGED = 2, EVENT_BSSID_CHANGED = 3, EVENT_LINK_CHANGED = 4, EVENT_ASSOC_DONE = 9,
-+       EVENT_SCAN_DONE = 10 };
++       EVENT_SCAN_DONE = 10,
++       /*
++        * RedMagic v183: iOS 16's IO80211.framework (__eventRead's jump table) sends event 0x91 to
++        * _dispatchWeightedAvgLQMUpdateEvent, which wants exactly 16 bytes: four SInt32, WEIGHT_AVG_RSSI,
++        * WEIGHT_AVG_SNR, WEIGHT_AVG_TX_RATE, WEIGHT_AVG_RX_RATE. wifid's bars follow these, not the RSSI request.
++        */
++       EVENT_WEIGHTED_AVG_LQM = 0x91 };
 +
 +static const char interface_name[16] = "en0";   /* (drivers/net/hakios.net.c makes one interface, and that is its name) */
 +
@@ -10387,6 +11619,14 @@ index 000000000..9f3e2a66c
 +	}
 +	case 103:                               /* all of it, as a scan's result */
 +		error = state->phase != HAKIOS_STA_JOINED ? ENXIO : give_network(request, &state->bss);
++		{
++			/* RedMagic v182: what iOS is told the signal is, now and then (its bars come from it) */
++			static unsigned told;
++			if (error == 0 && (told++ % 50) == 0) {
++				printf("apple80211: the network joined, as iOS is told it (%u times): RSSI %d dBm, noise %d, SNR %d\n",
++				    told, state->bss.rssi, HAKIOS_NOISE_DBM, state->bss.rssi - HAKIOS_NOISE_DBM);
++			}
++		}
 +		break;
 +	case 2: {                               /* how it was joined: open system, then WPA2 with a passphrase */
 +		struct {
@@ -10567,6 +11807,51 @@ index 000000000..9f3e2a66c
 +	kev_post_msg(&message);
 +}
 +
++/*
++ * RedMagic v183: the link's quality, as a driver keeps telling it: every 3 s while joined, the station's live signal
++ * (lx asks the firmware) as event 0x91. Started at the first link-up; it only reads the station's state.
++ */
++static bool lqm_started;
++static unsigned lqm_said;
++
++static void
++lqm_post(void)
++{
++	struct hakios_sta_state *state = kalloc_data(sizeof(*state), Z_WAITOK | Z_ZERO);
++	struct { int32_t rssi, snr, tx_rate, rx_rate; } lqm;
++
++	if (state == NULL) {
++		return;
++	}
++	hakios_sta_state(state);
++	if (state->phase == HAKIOS_STA_JOINED && state->bss.rssi < 0) {
++		lqm.rssi = state->bss.rssi;
++		lqm.snr = state->bss.rssi > HAKIOS_NOISE_DBM ? state->bss.rssi - HAKIOS_NOISE_DBM : 0;
++		lqm.tx_rate = 400;      /* Mbit/s: not measured yet */
++		lqm.rx_rate = 400;
++		post(EVENT_WEIGHTED_AVG_LQM, &lqm, sizeof(lqm));
++		if (lqm_said++ < 3 || lqm_said % 100 == 0) {
++			printf("apple80211: link quality told to iOS (event 0x91, %u times): RSSI %d dBm, SNR %d\n", lqm_said, lqm.rssi,
++			    lqm.snr);
++		}
++	}
++	kfree_data(state, sizeof(*state));
++}
++
++static void
++lqm_thread(__unused void *arg, __unused wait_result_t wr)
++{
++	for (;;) {
++		uint64_t deadline;
++
++		lqm_post();
++		nanoseconds_to_absolutetime(3ull * NSEC_PER_SEC, &deadline);
++		deadline += mach_absolute_time();
++		assert_wait_deadline((event_t)&lqm_started, THREAD_UNINT, deadline);
++		thread_block(THREAD_CONTINUE_NULL);
++	}
++}
++
 +/* What the station side says has happened (drivers/wifi/hakios.sta.c calls this, on its thread or the station's). */
 +void
 +hakios_apple80211_event(enum hakios_sta_event event, int status)
@@ -10609,6 +11894,13 @@ index 000000000..9f3e2a66c
 +		post(EVENT_SSID_CHANGED, NULL, 0);
 +		post(EVENT_BSSID_CHANGED, NULL, 0);
 +		post(EVENT_LINK_CHANGED, &link, sizeof(link));
++		if (status == 1 && !lqm_started) {
++			thread_t thread;
++			lqm_started = true;
++			if (kernel_thread_start(lqm_thread, NULL, &thread) == KERN_SUCCESS) {
++				thread_deallocate(thread);
++			}
++		}
 +		break;
 +	}
 +	}
@@ -21129,6 +22421,976 @@ index 000000000..5ef9adf1a
 +#define WLFW_SERVICE_COUNT	14
 +#define WLFW_SENDS_INI		1	/* fw_wmi_diag_event */
 +#define WLFW_SHADOW_REGISTERS	1	/* supports_shadow_regs */
+diff --git a/bsd/dev/rmwifi/rm_bt.c b/bsd/dev/rmwifi/rm_bt.c
+new file mode 100644
+index 000000000..26eb8abc0
+--- /dev/null
++++ b/bsd/dev/rmwifi/rm_bt.c
+@@ -0,0 +1,964 @@
++/*
++ * RedMagic 7 (NX679J, SM8450): QCA6490 Bluetooth, stage A. A kernel probe: it powers the chip's Bluetooth half and
++ * checks that the controller answers HCI_Reset over its UART. Nothing is torn down afterwards.
++ *
++ * Adapted from iOSPlus10 (MIT license; the OnePlus 10 Pro port of the same SoC and chip):
++ *   patches/xnu/0330-negroni-bt-uart-power.patch  power sequence, GCC S5 RCG table, polled GENI UART (FIFO mode)
++ *   patches/xnu/0334-negroni-bt-qup-clocks.patch  QUP2 clock check (hardware-gated AHB branches, CBCR HW_CTL)
++ *   patches/xnu/README-bluetooth.md, docs/bluetooth-plan.md; the HCI_Reset and EDL version exchange follow 0331
++ *   (steps 9 and 10).
++ *
++ * Differences from 0330/0334 on this board:
++ *   - registers only through umi_wifi.c's table of small mappings (rm_bt_read32/rm_bt_write32/rm_bt_mapped);
++ *   - every wait spins on mach_absolute_time (delay()/IODelay deadlines do not wait here);
++ *   - no rail votes: umi_rpmh_wifi_power already holds smpb11 966, smpc1 1900, smpb12 1350 and ldoe7 2800 mV, the
++ *     four Bluetooth rails of the live DT; no BCM QUP2 vote: wrap2 core and core_2x already run at boot (v180);
++ *   - no SE register is read unless the m_ahb, s_ahb and s5 CBCRs read CLK_OFF (bit 31) = 0. s_ahb reads 0x80000002
++ *     at boot (v180): HW_CTL set, so the branch gates itself while idle. 0334 accepts that state; here HW_CTL is
++ *     cleared instead, so the branch runs and CLK_OFF must read 0 before the SE is touched;
++ *   - power is BT_EN (gpio81) high only: Wi-Fi is up and owns WLAN_EN (gpio80) and the XO select (gpio204), so the
++ *     btpower.c BT_EN low pulse and XO_CLK pulse are left out;
++ *   - starts from the Wi-Fi normal session after "station ready" (umi_wifi.c), on its own thread: BT_EN high during
++ *     the PCIe power-up stopped the link from training (v160). /chosen u32 mondrian-rmbt: 1 = run (default off).
++ *
++ * Hardware (redmagic7/recon/live.dts; Linux gcc-sm8450.c, pinctrl-sm8450.c):
++ *   UART qcom,qup_uart@894000 (hsuart0, qupv3_se20_4uart, qcom,msm-geni-serial-hs) = QUP wrapper 2 SE5; the wrapper
++ *   qupv3_2_geni_se@8c0000 (QUP_HW_VER at +4).
++ *   Pins (qupv3_se20_cts/_rts/_tx/_rx_active): CTS gpio76 no pull, RTS gpio77 pull-down, TX gpio78 pull-up, RX gpio79
++ *   no pull, 2 mA, function qup20 = 1 (PINGROUP(76..79, qup20, ...)).
++ *   bt_qca6490: BT_EN gpio81, WLAN_EN gpio80, SW_CTRL gpio82, XO gpio204.
++ *   GCC vote 0x62010: bit 0 wrap2 core, 1 wrap_2 s_ahb, 2 wrap_2 m_ahb (clk_branch enable_mask), 3 wrap2 core_2x,
++ *   9 wrap2 s5. CBCRs: core_2x 0x3328c, core 0x33280, s5 0x2e610, m_ahb 0x2e004, s_ahb 0x2e008. S5 RCG 0x2e618
++ *   (gcc_qupv3_wrap2_s5_clk_src, ftbl_gcc_qupv3_wrap0_s0_clk_src: 7372800 Hz = GPLL0_OUT_EVEN (src 6) * 384 / 15625).
++ *
++ * Log: every line starts "RM BT: "; "RM BT: stop: ..." names the step that failed.
++ */
++#include <kern/sched_prim.h>
++#include <pexpert/arm64/board_config.h>
++#if defined(MONDRIAN)
++#include <stdbool.h>
++#include <stdint.h>
++#include <kern/clock.h>
++#include <kern/thread.h>
++#include <mach/mach_types.h>
++#include <machine/machine_routines.h>
++#include <libkern/libkern.h>
++#include <os/atomic_private.h>
++#include <pexpert/pexpert.h>
++#include <pexpert/device_tree.h>
++#include <sys/errno.h>
++#include <sys/systm.h>
++
++extern void hakios_tl(const char *, ...) __printflike(1, 2);
++extern void mondrian_log_flush_now(void);
++extern bool rm_bt_mapped(uint32_t address);             /* umi_wifi.c: the page is in umi_pcie_regions[] and mapped */
++extern uint32_t rm_bt_read32(uint32_t address);
++extern void rm_bt_write32(uint32_t address, uint32_t value);
++void rm_bt_start(void);
++
++/* GCC (gcc-sm8450.c) */
++#define GCC                     0x00100000u
++#define GCC_VOTE                (GCC + 0x62010u)
++#define VOTE_CORE               (1u << 0)
++#define VOTE_S_AHB              (1u << 1)
++#define VOTE_M_AHB              (1u << 2)
++#define VOTE_CORE2X             (1u << 3)
++#define VOTE_S5                 (1u << 9)
++#define VOTE_WANT               (VOTE_CORE | VOTE_S_AHB | VOTE_M_AHB | VOTE_CORE2X | VOTE_S5)
++#define CBCR_CORE2X             (GCC + 0x3328cu)
++#define CBCR_CORE               (GCC + 0x33280u)
++#define CBCR_S5                 (GCC + 0x2e610u)
++#define CBCR_M_AHB              (GCC + 0x2e004u)
++#define CBCR_S_AHB              (GCC + 0x2e008u)
++#define CBCR_OFF                (1u << 31)
++#define CBCR_HW_CTL             (1u << 1)
++#define RCG                     (GCC + 0x2e618u)
++#define RCG_CMD_UPDATE          (1u << 0)
++#define RCG_CMD_ROOT_OFF        (1u << 31)
++#define RCG_CFG                 0x4u
++#define RCG_M                   0x8u
++#define RCG_N                   0xcu
++#define RCG_D                   0x10u
++#define RCG_DFSR                0x14u           /* bit 0: DFS enabled */
++#define RCG_PERF_DFSR(l)        (0x1cu + 4u * (l))
++#define RCG_PERF_M_DFSR(l)      (0x5cu + 4u * (l))
++#define RCG_PERF_N_DFSR(l)      (0x9cu + 4u * (l))
++#define RCG_LEVELS              8u
++#define RCG_HID_MASK            0x1fu
++#define RCG_MND_MASK            0xffffu
++#define UART_REF_HZ             7372800u        /* ftbl entry 0: GPLL0_OUT_EVEN 300 MHz * 384 / 15625 */
++
++/* TLMM: one 4 KiB page per GPIO, config at +0, in/out at +4 */
++#define TLMM(n)                 (0x0f100000u + (uint32_t)(n) * 0x1000u)
++#define PIN_CTS                 76u
++#define PIN_RTS                 77u
++#define PIN_TX                  78u
++#define PIN_RX                  79u
++#define PIN_WLAN_EN             80u
++#define PIN_BT_EN               81u
++#define PIN_SW_CTRL             82u
++#define PIN_XO                  204u
++#define TLMM_OE                 (1u << 9)
++#define TLMM_EGPIO_PRESENT      (1u << 11)
++#define TLMM_EGPIO_ENABLE       (1u << 12)
++#define QUP20_FUNC              1u
++#define PULL_NONE               0u
++#define PULL_DOWN               1u
++#define PULL_UP                 3u
++
++/* QUP wrapper 2 and its SE5 (Linux qcom-geni-se.h / qcom_geni_serial.c offsets) */
++#define QUP2                    0x008c0000u
++#define QUP_HW_VER              (QUP2 + 0x4u)
++#define SE_BASE                 0x00894000u
++#define SE(off)                 (SE_BASE + (off))
++#define GENI_FORCE_DEFAULT      0x020u
++#define GENI_OUTPUT_CTRL        0x024u
++#define GENI_CGC_CTRL           0x028u
++#define GENI_STATUS             0x040u          /* bit 0 M command active, bit 12 S command active */
++#define GENI_SER_M_CLK_CFG      0x048u
++#define GENI_SER_S_CLK_CFG      0x04cu
++#define GENI_CLK_CTRL_RO        0x060u
++#define GENI_IF_DISABLE_RO      0x064u          /* bit 0 FIFO_IF_DISABLE */
++#define GENI_FW_REVISION_RO     0x068u          /* bits 15:8 protocol: 2 = UART */
++#define GENI_FW_S_REVISION_RO   0x06cu
++#define GENI_CLK_SEL            0x07cu
++#define UART_LOOPBACK_CFG       0x22cu
++#define GENI_BYTE_GRAN          0x254u
++#define GENI_DMA_MODE_EN        0x258u
++#define UART_TX_TRANS_CFG       0x25cu          /* bit 1: CTS mask (1 = ignore CTS) */
++#define GENI_TX_PACKING_CFG0    0x260u
++#define GENI_TX_PACKING_CFG1    0x264u
++#define UART_TX_WORD_LEN        0x268u
++#define UART_TX_STOP_BIT_LEN    0x26cu
++#define UART_TX_TRANS_LEN       0x270u
++#define UART_RX_TRANS_CFG       0x280u
++#define GENI_RX_PACKING_CFG0    0x284u
++#define GENI_RX_PACKING_CFG1    0x288u
++#define UART_RX_WORD_LEN        0x28cu
++#define UART_RX_STALE_CNT       0x294u
++#define UART_TX_PARITY_CFG      0x2a4u
++#define UART_RX_PARITY_CFG      0x2a8u
++#define UART_MANUAL_RFR         0x2acu
++#define GENI_M_CMD0             0x600u
++#define GENI_M_CMD_CTRL         0x604u
++#define GENI_M_IRQ_STATUS       0x610u
++#define GENI_M_IRQ_EN           0x614u
++#define GENI_M_IRQ_CLEAR        0x618u
++#define GENI_S_CMD0             0x630u
++#define GENI_S_CMD_CTRL         0x634u
++#define GENI_S_IRQ_STATUS       0x640u
++#define GENI_S_IRQ_EN           0x644u
++#define GENI_S_IRQ_CLEAR        0x648u
++#define GENI_TX_FIFO            0x700u
++#define GENI_RX_FIFO            0x780u
++#define GENI_TX_FIFO_STATUS     0x800u          /* bits 27:0 word count */
++#define GENI_RX_FIFO_STATUS     0x804u          /* bit 31 last, 30:28 bytes in the last word, 24:0 word count */
++#define GENI_TX_WATERMARK       0x80cu
++#define GENI_RX_WATERMARK       0x810u
++#define GENI_RX_RFR_WATERMARK   0x814u
++#define GENI_IOS                0x908u          /* bit 1 CTS level, bit 0 RX level */
++#define DMA_TX_IRQ_CLR          0xc44u
++#define DMA_RX_IRQ_CLR          0xd44u
++#define SE_GSI_EVENT_EN         0xe18u
++#define SE_IRQ_EN               0xe1cu
++#define SE_HW_PARAM_0           0xe24u
++#define SE_HW_PARAM_1           0xe28u
++#define SE_DMA_GENERAL_CFG      0xe30u
++#define STATUS_M_ACTIVE         (1u << 0)
++#define STATUS_S_ACTIVE         (1u << 12)
++#define M_CMD_DONE              (1u << 0)
++#define CMD_CANCEL_DONE         (1u << 4)
++#define CMD_ABORT_DONE          (1u << 5)
++#define CMD_CTRL_ABORT          (1u << 1)
++#define CMD_CTRL_CANCEL         (1u << 2)
++#define UART_START_TX           1u
++#define UART_START_READ         1u
++#define UART_CTS_MASK           (1u << 1)
++#define PROTO_UART              2u
++
++/* HCI (H4) */
++#define H4_CMD                  0x01u
++#define H4_EVT                  0x04u
++#define EV_CMD_COMPLETE         0x0eu
++#define EV_CMD_STATUS           0x0fu
++#define EV_HW_ERROR             0x10u
++#define EV_VENDOR               0xffu
++#define OP_RESET                0x0c03u
++#define OP_EDL                  0xfc00u         /* QCA EDL_PATCH_CMD_OPCODE */
++#define EDL_VER_REQ             0x19u
++#define EDL_APP_VER_RES         0x02u
++
++#define RX_MAX                  512u
++#define DUMP_MAX                48u
++
++static struct {
++	uint32_t vote_before, vote_added;
++	uint32_t hwctl_cleared[4], nhwctl;
++	bool dfs;
++	uint64_t level_hz[RCG_LEVELS];
++	uint32_t qup_ver, fw, sampling, tx_depth, rx_depth;
++	uint32_t clk_hz, clk_div, clk_level;
++	bool cts_ignored;
++	uint8_t rx[RX_MAX];
++	uint32_t rxn, rx_total, rx_dropped, rx_restarts, s_irq_seen;
++} bt;
++
++static bool rm_bt_started;
++
++/* ---- time and registers ---- */
++
++static uint64_t
++bt_us(void)
++{
++	uint64_t ns = 0;
++	absolutetime_to_nanoseconds(mach_absolute_time(), &ns);
++	return ns / 1000u;
++}
++
++static void
++bt_spin_us(uint32_t us)
++{
++	uint64_t ticks = 0, end;
++	nanoseconds_to_absolutetime((uint64_t)us * 1000u, &ticks);
++	end = mach_absolute_time() + ticks;
++	while (mach_absolute_time() < end) {
++		__asm__ volatile ("yield");
++	}
++}
++
++static inline uint32_t
++rd(uint32_t a)
++{
++	return rm_bt_read32(a);
++}
++
++static inline void
++wr(uint32_t a, uint32_t v)
++{
++	rm_bt_write32(a, v);
++}
++
++/* true when (reg & mask) == want within `us` microseconds */
++static bool
++bt_wait(uint32_t reg, uint32_t mask, uint32_t want, uint32_t us)
++{
++	uint64_t end = bt_us() + us;
++	for (;;) {
++		if ((rd(reg) & mask) == want) {
++			return true;
++		}
++		if (bt_us() > end) {
++			return false;
++		}
++		bt_spin_us(5);
++	}
++}
++
++static const char *
++bt_hex(const uint8_t *b, uint32_t n)
++{
++	static char s[3 * DUMP_MAX + 8];
++	uint32_t m = n < DUMP_MAX ? n : DUMP_MAX;
++	s[0] = 0;
++	for (uint32_t i = 0; i < m; i++) {
++		snprintf(s + 3 * i, 4, " %02x", b[i]);
++	}
++	if (n > m) {
++		strlcpy(s + 3 * m, " ...", 5);
++	}
++	return s;
++}
++
++static inline uint16_t
++le16(const uint8_t *p)
++{
++	return (uint16_t)(p[0] | p[1] << 8);
++}
++
++static inline uint32_t
++le32(const uint8_t *p)
++{
++	return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
++}
++
++/* ---- step 1: census ---- */
++
++static const char *
++cbcr_text(uint32_t v)
++{
++	if (!(v & CBCR_OFF)) {
++		return "on";
++	}
++	return (v & CBCR_HW_CTL) ? "OFF (CLK_OFF + HW_CTL: hardware-gated)" : "OFF";
++}
++
++/* clk-rcg2.c calc_rate, parents of gcc_parent_map_0 */
++static uint64_t
++rcg_rate(uint32_t cfg, uint32_t m, uint32_t notnm)
++{
++	uint32_t src = (cfg >> 8) & 7u, hid = cfg & RCG_HID_MASK, mode = (cfg >> 12) & 3u;
++	uint64_t r = src == 0 ? 19200000ull : src == 1 ? 600000000ull : src == 6 ? 300000000ull : 0;
++	if (hid) {
++		r = r * 2u / (hid + 1u);
++	}
++	if (mode) {
++		uint32_t mm = m & RCG_MND_MASK, n = ((~notnm) & RCG_MND_MASK) + mm;
++		if (n) {
++			r = r * mm / n;
++		}
++	}
++	return r;
++}
++
++static void
++bt_pin_line(const char *name, uint32_t n)
++{
++	uint32_t c = rd(TLMM(n)), io = rd(TLMM(n) + 4u);
++	hakios_tl("RM BT: 1 GPIO%u %s: cfg %#x (func %u, %u mA, pull %u, %s%s) in %u out %u\n", n, name, c,
++	    (c >> 2) & 0xfu, ((c >> 6) & 7u) * 2u + 2u, c & 3u, (c & TLMM_OE) ? "output" : "input",
++	    (c & TLMM_EGPIO_PRESENT) ? ", eGPIO" : "", io & 1u, (io >> 1) & 1u);
++}
++
++static void
++bt_census(void)
++{
++	static const struct { const char *name; uint32_t reg; } cbcr[] = {
++		{ "wrap2 core_2x", CBCR_CORE2X }, { "wrap2 core", CBCR_CORE }, { "wrap2 s5", CBCR_S5 },
++		{ "wrap_2 m_ahb", CBCR_M_AHB }, { "wrap_2 s_ahb", CBCR_S_AHB },
++	};
++	for (unsigned i = 0; i < sizeof(cbcr) / sizeof(cbcr[0]); i++) {
++		uint32_t v = rd(cbcr[i].reg);
++		hakios_tl("RM BT: 1 GCC %s CBCR (+%#x) = %#x: %s\n", cbcr[i].name, cbcr[i].reg - GCC, v, cbcr_text(v));
++	}
++	hakios_tl("RM BT: 1 GCC vote (+0x62010) = %#x\n", rd(GCC_VOTE));
++	uint32_t cmd = rd(RCG), cfg = rd(RCG + RCG_CFG), m = rd(RCG + RCG_M), n = rd(RCG + RCG_N);
++	uint32_t dfsr = rd(RCG + RCG_DFSR);
++	hakios_tl("RM BT: 1 S5 RCG (+0x2e618) cmd %#x (root %s) cfg %#x m %#x n %#x d %#x dfsr %#x (DFS %s): %llu Hz\n",
++	    cmd, (cmd & RCG_CMD_ROOT_OFF) ? "off" : "on", cfg, m, n, rd(RCG + RCG_D), dfsr, (dfsr & 1u) ? "on" : "off",
++	    rcg_rate(cfg, m, n));
++	bt_pin_line("CTS", PIN_CTS);
++	bt_pin_line("RTS", PIN_RTS);
++	bt_pin_line("TX", PIN_TX);
++	bt_pin_line("RX", PIN_RX);
++	bt_pin_line("WLAN_EN", PIN_WLAN_EN);
++	bt_pin_line("BT_EN", PIN_BT_EN);
++	bt_pin_line("SW_CTRL", PIN_SW_CTRL);
++	bt_pin_line("XO", PIN_XO);
++}
++
++/* ---- step 2: clocks ---- */
++
++static bool
++bt_branch_on(const char *name, uint32_t reg)
++{
++	if (bt_wait(reg, CBCR_OFF, 0, 20000)) {
++		hakios_tl("RM BT: 2 %s on (CBCR %#x)\n", name, rd(reg));
++		return true;
++	}
++	uint32_t v = rd(reg);
++	if ((v & CBCR_HW_CTL) && bt.nhwctl < 4) {
++		/* clk-branch.c: CLK_OFF reads 1 while a hardware-gated branch is idle; without HW_CTL it runs and says so */
++		hakios_tl("RM BT: 2 %s CBCR %#x: CLK_OFF with HW_CTL (hardware-gated); HW_CTL cleared so the branch runs\n",
++		    name, v);
++		wr(reg, v & ~CBCR_HW_CTL);
++		bt.hwctl_cleared[bt.nhwctl++] = reg;
++		if (bt_wait(reg, CBCR_OFF, 0, 20000)) {
++			hakios_tl("RM BT: 2 %s on (CBCR %#x)\n", name, rd(reg));
++			return true;
++		}
++	}
++	hakios_tl("RM BT: 2 %s does NOT come on (CBCR %#x)\n", name, rd(reg));
++	return false;
++}
++
++static void
++bt_clocks_undo(void)
++{
++	for (uint32_t i = 0; i < bt.nhwctl; i++) {
++		wr(bt.hwctl_cleared[i], rd(bt.hwctl_cleared[i]) | CBCR_HW_CTL);
++	}
++	if (bt.vote_added) {
++		wr(GCC_VOTE, rd(GCC_VOTE) & ~bt.vote_added);
++	}
++	hakios_tl("RM BT: 2 clocks put back: HW_CTL set again on %u branch(es), vote %#x\n", bt.nhwctl, rd(GCC_VOTE));
++}
++
++/* gcc_qupv3_wrap2_s5_clk_src to ftbl entry 0 (clk-rcg2.c __clk_rcg2_configure): 7372800 Hz, also exact for 32x */
++static bool
++bt_rcg_program(void)
++{
++	uint32_t cfg = rd(RCG + RCG_CFG) & ~(RCG_HID_MASK | 7u << 8 | 3u << 12);
++	cfg |= 1u;                      /* pre_div 2 * 1 - 1: divide by 1 */
++	cfg |= 6u << 8;                 /* GPLL0_OUT_EVEN */
++	cfg |= 2u << 12;                /* M/N dual edge */
++	wr(RCG + RCG_M, 384u);
++	wr(RCG + RCG_N, ~(15625u - 384u) & RCG_MND_MASK);
++	wr(RCG + RCG_D, ~15625u & RCG_MND_MASK);
++	wr(RCG + RCG_CFG, cfg);
++	wr(RCG, rd(RCG) | RCG_CMD_UPDATE);
++	bool ok = bt_wait(RCG, RCG_CMD_UPDATE, 0, 20000);
++	uint32_t c = rd(RCG + RCG_CFG), m = rd(RCG + RCG_M), n = rd(RCG + RCG_N);
++	hakios_tl("RM BT: 2 S5 RCG programmed: cmd %#x cfg %#x m %#x n %#x d %#x -> %llu Hz (update %s)\n", rd(RCG), c,
++	    m, n, rd(RCG + RCG_D), rcg_rate(c, m, n), ok ? "done" : "NOT done");
++	return ok;
++}
++
++static bool
++bt_clocks(void)
++{
++	uint32_t vote = rd(GCC_VOTE);
++	bt.vote_before = vote;
++	bt.vote_added = VOTE_WANT & ~vote;
++	if (bt.vote_added) {
++		wr(GCC_VOTE, vote | VOTE_WANT);
++	}
++	hakios_tl("RM BT: 2 GCC vote %#x -> %#x (added %#x; core 0, s_ahb 1, m_ahb 2, core_2x 3, s5 9)\n", vote,
++	    rd(GCC_VOTE), bt.vote_added);
++	if (!bt_branch_on("wrap2 core", CBCR_CORE) || !bt_branch_on("wrap2 core_2x", CBCR_CORE2X) ||
++	    !bt_branch_on("wrap_2 m_ahb", CBCR_M_AHB) || !bt_branch_on("wrap_2 s_ahb", CBCR_S_AHB)) {
++		return false;
++	}
++	bt.dfs = (rd(RCG + RCG_DFSR) & 1u) != 0;
++	if (bt.dfs) {
++		/* the SE picks a level with GENI_CLK_SEL (step 4); the RCG itself is not written */
++		for (uint32_t l = 0; l < RCG_LEVELS; l++) {
++			uint32_t c = rd(RCG + RCG_PERF_DFSR(l));
++			bt.level_hz[l] = rcg_rate(c, rd(RCG + RCG_PERF_M_DFSR(l)), rd(RCG + RCG_PERF_N_DFSR(l)));
++			hakios_tl("RM BT: 2 S5 DFS level %u: cfg %#x -> %llu Hz\n", l, c, bt.level_hz[l]);
++		}
++	} else if (!bt_rcg_program()) {
++		return false;
++	}
++	return bt_branch_on("wrap2 s5", CBCR_S5);
++}
++
++/* ---- step 3: pins ---- */
++
++static void
++bt_pin_cfg(uint32_t n, uint32_t cfg)
++{
++	if (rd(TLMM(n)) & TLMM_EGPIO_PRESENT) {
++		cfg |= TLMM_EGPIO_ENABLE;       /* pinctrl-msm.c: an eGPIO belongs to the apps TLMM only with bit 12 */
++	}
++	wr(TLMM(n), cfg);
++}
++
++static void
++bt_pins(void)
++{
++	bt_pin_cfg(PIN_CTS, QUP20_FUNC << 2 | PULL_NONE);
++	bt_pin_cfg(PIN_RTS, QUP20_FUNC << 2 | PULL_DOWN);
++	bt_pin_cfg(PIN_TX, QUP20_FUNC << 2 | PULL_UP);
++	bt_pin_cfg(PIN_RX, QUP20_FUNC << 2 | PULL_NONE);
++	hakios_tl("RM BT: 3 pins 76-79 -> qup20 (CTS none, RTS down, TX up, RX none, 2 mA): cfg %#x %#x %#x %#x\n",
++	    rd(TLMM(PIN_CTS)), rd(TLMM(PIN_RTS)), rd(TLMM(PIN_TX)), rd(TLMM(PIN_RX)));
++}
++
++/* ---- step 4: GENI SE5 as a UART ---- */
++
++static void
++bt_cancel(uint32_t ctrl, uint32_t status, uint32_t clear)
++{
++	wr(SE(ctrl), CMD_CTRL_CANCEL);
++	if (!bt_wait(SE(status), CMD_CANCEL_DONE, CMD_CANCEL_DONE, 2000)) {
++		wr(SE(ctrl), CMD_CTRL_ABORT);
++		(void)bt_wait(SE(status), CMD_ABORT_DONE, CMD_ABORT_DONE, 2000);
++	}
++	wr(SE(clear), 0xffffffffu);
++}
++
++static bool
++bt_set_baud(uint32_t baud)
++{
++	uint64_t want = (uint64_t)baud * bt.sampling, hz = 0, best_delta = ~0ull;
++	uint32_t level = 0;
++
++	if (bt.dfs) {
++		for (uint32_t l = 0; l < RCG_LEVELS; l++) {
++			uint64_t h = bt.level_hz[l];
++			if (!h) {
++				continue;
++			}
++			uint64_t d = (h + want - 1u) / want, got = h / d, delta = want > got ? want - got : got - want;
++			if (d <= 0xfffu && delta < best_delta) {
++				best_delta = delta;
++				level = l;
++				hz = h;
++			}
++		}
++	} else {
++		hz = UART_REF_HZ;
++	}
++	if (!hz) {
++		hakios_tl("RM BT: stop: step 4: no S5 clock level for %u baud\n", baud);
++		return false;
++	}
++	uint64_t div = (hz + want - 1u) / want, got = hz / div, delta = want > got ? want - got : got - want;
++	if (div > 0xfffu || delta * 50u > want) {
++		hakios_tl("RM BT: stop: step 4: %llu Hz gives no divider within 2 %% of %u baud x %u\n", hz, baud, bt.sampling);
++		return false;
++	}
++	wr(SE(GENI_CLK_SEL), bt.dfs ? (level & 7u) : 0u);
++	uint32_t ser = 1u | (uint32_t)div << 4;  /* SER_CLK_EN | CLK_DIV */
++	wr(SE(GENI_SER_M_CLK_CFG), ser);
++	wr(SE(GENI_SER_S_CLK_CFG), ser);
++	bt.clk_hz = (uint32_t)hz;
++	bt.clk_div = (uint32_t)div;
++	bt.clk_level = level;
++	hakios_tl("RM BT: 4 baud %u: %s %u = %llu Hz / %llu / %u (error %llu Hz)\n", baud, bt.dfs ? "DFS level" : "RCG table",
++	    level, hz, div, bt.sampling, delta / bt.sampling);
++	return true;
++}
++
++static bool
++bt_se_init(void)
++{
++	bt.qup_ver = rd(QUP_HW_VER);
++	bt.fw = rd(SE(GENI_FW_REVISION_RO));
++	uint32_t ifd = rd(SE(GENI_IF_DISABLE_RO)), p0 = rd(SE(SE_HW_PARAM_0)), p1 = rd(SE(SE_HW_PARAM_1));
++	uint32_t major = bt.qup_ver >> 28, minor = (bt.qup_ver >> 16) & 0xfffu, proto = (bt.fw >> 8) & 0xffu;
++	bool big = major > 3 || (major == 3 && minor >= 10);    /* geni_se_get_tx_fifo_depth: 8-bit depth from 3.10 */
++
++	bt.sampling = bt.qup_ver >= 0x20050000u ? 16u : 32u;  /* qcom_geni_serial: oversampling halved from QUP 2.5 */
++	bt.tx_depth = (p0 >> 16) & (big ? 0xffu : 0x3fu);
++	bt.rx_depth = (p1 >> 16) & (big ? 0xffu : 0x3fu);
++	hakios_tl("RM BT: 4 QUP2 HW version %#x (%u.%u, oversampling %u); SE5 GENI_FW_REVISION_RO %#x: protocol %u (%s), "
++	    "S revision %#x, IF_DISABLE %#x, status %#x, CLK_CTRL %#x\n", bt.qup_ver, major, minor, bt.sampling, bt.fw, proto,
++	    proto == PROTO_UART ? "UART" : "NOT UART", rd(SE(GENI_FW_S_REVISION_RO)), ifd, rd(SE(GENI_STATUS)),
++	    rd(SE(GENI_CLK_CTRL_RO)));
++	hakios_tl("RM BT: 4 HW_PARAM_0 %#x (TX FIFO %u words), HW_PARAM_1 %#x (RX FIFO %u words), DMA_MODE_EN %#x, "
++	    "CLK_SEL %#x, SER_M_CLK_CFG %#x\n", p0, bt.tx_depth, p1, bt.rx_depth, rd(SE(GENI_DMA_MODE_EN)),
++	    rd(SE(GENI_CLK_SEL)), rd(SE(GENI_SER_M_CLK_CFG)));
++	mondrian_log_flush_now();
++	if (bt.fw == 0xffffffffu || proto != PROTO_UART) {
++		hakios_tl("RM BT: stop: step 4: SE5 has no UART firmware (protocol %u; XBL loads it from qupfw)\n", proto);
++		return false;
++	}
++	if (ifd & 1u) {
++		hakios_tl("RM BT: stop: step 4: SE5 FIFO interface disabled (GSI only)\n");
++		return false;
++	}
++	if (bt.tx_depth < 4 || bt.rx_depth < 4) {
++		hakios_tl("RM BT: stop: step 4: FIFO depth %u/%u words is not usable\n", bt.tx_depth, bt.rx_depth);
++		return false;
++	}
++	if (rd(SE(GENI_STATUS)) & STATUS_M_ACTIVE) {
++		bt_cancel(GENI_M_CMD_CTRL, GENI_M_IRQ_STATUS, GENI_M_IRQ_CLEAR);
++	}
++	if (rd(SE(GENI_STATUS)) & STATUS_S_ACTIVE) {
++		bt_cancel(GENI_S_CMD_CTRL, GENI_S_IRQ_STATUS, GENI_S_IRQ_CLEAR);
++	}
++	/* geni_se_init: irq clear, geni_se_io_init, geni_se_io_set_mode (FIFO), watermarks; polled: no M/S interrupts */
++	wr(SE(SE_GSI_EVENT_EN), 0);
++	wr(SE(GENI_M_IRQ_CLEAR), 0xffffffffu);
++	wr(SE(GENI_S_IRQ_CLEAR), 0xffffffffu);
++	wr(SE(DMA_TX_IRQ_CLR), 0xffffffffu);
++	wr(SE(DMA_RX_IRQ_CLR), 0xffffffffu);
++	wr(SE(GENI_CGC_CTRL), rd(SE(GENI_CGC_CTRL)) | 0x7fu);
++	wr(SE(SE_DMA_GENERAL_CFG), rd(SE(SE_DMA_GENERAL_CFG)) | 0xfu);
++	wr(SE(GENI_OUTPUT_CTRL), 0x7fu);
++	wr(SE(GENI_FORCE_DEFAULT), 1u);
++	wr(SE(SE_IRQ_EN), rd(SE(SE_IRQ_EN)) | 0xfu);
++	wr(SE(GENI_DMA_MODE_EN), rd(SE(GENI_DMA_MODE_EN)) & ~1u);
++	wr(SE(GENI_M_IRQ_EN), 0);
++	wr(SE(GENI_S_IRQ_EN), 0);
++	wr(SE(GENI_RX_WATERMARK), 2u);
++	wr(SE(GENI_RX_RFR_WATERMARK), bt.rx_depth - 2u);
++	wr(SE(GENI_TX_WATERMARK), 0);
++	/* geni_se_config_packing(8 bits, 4 per word, LSB first, TX and RX) */
++	wr(SE(GENI_TX_PACKING_CFG0), 0x4380eu);
++	wr(SE(GENI_TX_PACKING_CFG1), 0xc3e0eu);
++	wr(SE(GENI_RX_PACKING_CFG0), 0x4380eu);
++	wr(SE(GENI_RX_PACKING_CFG1), 0xc3e0eu);
++	wr(SE(GENI_BYTE_GRAN), 0);
++	/* set_termios: 8N1, no loopback, stale timeout 16 characters, RTS/CTS */
++	wr(SE(UART_RX_STALE_CNT), 10u * 16u);
++	wr(SE(UART_LOOPBACK_CFG), 0);
++	wr(SE(UART_TX_TRANS_CFG), 0);
++	wr(SE(UART_RX_TRANS_CFG), 0);
++	wr(SE(UART_TX_PARITY_CFG), 0);
++	wr(SE(UART_RX_PARITY_CFG), 0);
++	wr(SE(UART_TX_WORD_LEN), 8u);
++	wr(SE(UART_RX_WORD_LEN), 8u);
++	wr(SE(UART_TX_STOP_BIT_LEN), 0);
++	wr(SE(UART_MANUAL_RFR), 0);     /* RFR follows the RX FIFO */
++	if (!bt_set_baud(115200u)) {
++		return false;
++	}
++	bt.rxn = 0;
++	wr(SE(GENI_S_CMD0), UART_START_READ << 27);
++	hakios_tl("RM BT: 4 UART 115200 8N1 FIFO mode (polled), RTS/CTS, RX started: status %#x, IOS %#x (CTS %u, RX %u)\n",
++	    rd(SE(GENI_STATUS)), rd(SE(GENI_IOS)), (rd(SE(GENI_IOS)) >> 1) & 1u, rd(SE(GENI_IOS)) & 1u);
++	return true;
++}
++
++/* ---- UART I/O (0330 helpers, spinning) ---- */
++
++static void
++bt_rx_drain(void)
++{
++	uint32_t st = rd(SE(GENI_RX_FIFO_STATUS)), wc = st & 0x1ffffffu;
++	bool last = (st & (1u << 31)) != 0;
++
++	if (wc > 256u) {                /* not a FIFO depth: read at most 256 words */
++		wc = 256u;
++		last = false;
++	}
++	for (uint32_t i = 0; i < wc; i++) {
++		uint32_t w = rd(SE(GENI_RX_FIFO)), nb = 4;
++		if (i == wc - 1u && last) {
++			nb = (st >> 28) & 7u;
++			if (nb == 0 || nb > 4) {
++				nb = 4;
++			}
++		}
++		for (uint32_t b = 0; b < nb; b++) {
++			bt.rx_total++;
++			if (bt.rxn < RX_MAX) {
++				bt.rx[bt.rxn++] = (uint8_t)(w >> (8u * b));
++			} else {
++				bt.rx_dropped++;
++			}
++		}
++	}
++	uint32_t s = rd(SE(GENI_S_IRQ_STATUS));
++	if (s) {
++		bt.s_irq_seen |= s;
++		wr(SE(GENI_S_IRQ_CLEAR), s);
++	}
++	if (!(rd(SE(GENI_STATUS)) & STATUS_S_ACTIVE)) {   /* the read command ended (break, error): start it again */
++		bt.rx_restarts++;
++		wr(SE(GENI_S_CMD0), UART_START_READ << 27);
++	}
++}
++
++/* drain RX for `us` microseconds, every 1 ms */
++static void
++bt_rx_for(uint32_t us)
++{
++	uint64_t end = bt_us() + us;
++	do {
++		bt_rx_drain();
++		bt_spin_us(1000);
++	} while (bt_us() < end);
++	bt_rx_drain();
++}
++
++static int
++bt_uart_write(const uint8_t *buf, uint32_t len)
++{
++	/* time on the wire at 10 bits per character + 1 s for CTS held by a controller that is still booting */
++	uint64_t t0 = bt_us(), limit = (uint64_t)len * 10u * 1000000u / 115200u + 1000000u;
++
++	if (rd(SE(GENI_STATUS)) & STATUS_M_ACTIVE) {
++		bt_cancel(GENI_M_CMD_CTRL, GENI_M_IRQ_STATUS, GENI_M_IRQ_CLEAR);
++	}
++	wr(SE(GENI_M_IRQ_CLEAR), M_CMD_DONE);
++	wr(SE(UART_TX_TRANS_LEN), len);
++	wr(SE(GENI_M_CMD0), UART_START_TX << 27);
++	for (uint32_t i = 0; i < len; i += 4) {
++		uint32_t w = 0;
++		for (uint32_t b = 0; b < 4 && i + b < len; b++) {
++			w |= (uint32_t)buf[i + b] << (8u * b);
++		}
++		while ((rd(SE(GENI_TX_FIFO_STATUS)) & 0x0fffffffu) >= bt.tx_depth) {
++			bt_rx_drain();
++			if (bt_us() - t0 > limit) {
++				hakios_tl("RM BT: TX stalled at byte %u of %u (FIFO full, IOS %#x: CTS %u)\n", i, len,
++				    rd(SE(GENI_IOS)), (rd(SE(GENI_IOS)) >> 1) & 1u);
++				bt_cancel(GENI_M_CMD_CTRL, GENI_M_IRQ_STATUS, GENI_M_IRQ_CLEAR);
++				return ETIMEDOUT;
++			}
++			bt_spin_us(20);
++		}
++		wr(SE(GENI_TX_FIFO), w);
++	}
++	while (!(rd(SE(GENI_M_IRQ_STATUS)) & M_CMD_DONE)) {
++		bt_rx_drain();
++		if (bt_us() - t0 > limit) {
++			hakios_tl("RM BT: TX of %u bytes did not complete (IOS %#x: CTS %u, TX FIFO %#x, status %#x)\n", len,
++			    rd(SE(GENI_IOS)), (rd(SE(GENI_IOS)) >> 1) & 1u, rd(SE(GENI_TX_FIFO_STATUS)), rd(SE(GENI_STATUS)));
++			bt_cancel(GENI_M_CMD_CTRL, GENI_M_IRQ_STATUS, GENI_M_IRQ_CLEAR);
++			return ETIMEDOUT;
++		}
++		bt_spin_us(20);
++	}
++	wr(SE(GENI_M_IRQ_CLEAR), M_CMD_DONE);
++	return 0;
++}
++
++/* ---- step 5: power ---- */
++
++static void
++bt_power(void)
++{
++	uint32_t cfg = rd(TLMM(PIN_BT_EN)), io = rd(TLMM(PIN_BT_EN) + 4u);
++	uint32_t sw0 = rd(TLMM(PIN_SW_CTRL) + 4u) & 1u;
++
++	hakios_tl("RM BT: 5 before: BT_EN cfg %#x out %u in %u, WLAN_EN in %u (left as it is), SW_CTRL %u\n", cfg,
++	    (io >> 1) & 1u, io & 1u, rd(TLMM(PIN_WLAN_EN) + 4u) & 1u, sw0);
++	bt_rx_drain();
++	if (bt.rxn) {
++		hakios_tl("RM BT: 5 %u bytes on the line before BT_EN:%s\n", bt.rxn, bt_hex(bt.rx, bt.rxn));
++	}
++	bt.rxn = 0;
++	/* as umi_pcie.c gpio_output(81, true, 1): value first, then GPIO function, pull-down, 2 mA, output enable */
++	wr(TLMM(PIN_BT_EN) + 4u, rd(TLMM(PIN_BT_EN) + 4u) | 2u);
++	wr(TLMM(PIN_BT_EN), (cfg & ~0x3ffu) | PULL_DOWN | TLMM_OE);
++	hakios_tl("RM BT: 5 BT_EN high (%s); 100 ms\n", ((io >> 1) & 1u) && (cfg & TLMM_OE) ? "it already was" : "was low");
++	mondrian_log_flush_now();
++	bt_rx_for(100000);
++	io = rd(TLMM(PIN_BT_EN) + 4u);
++	uint32_t sw = rd(TLMM(PIN_SW_CTRL) + 4u) & 1u;
++	hakios_tl("RM BT: 5 after 100 ms: BT_EN cfg %#x out %u in %u, SW_CTRL %u (before %u), IOS %#x (CTS %u), "
++	    "%u bytes from the controller%s%s\n", rd(TLMM(PIN_BT_EN)), (io >> 1) & 1u, io & 1u, sw, sw0, rd(SE(GENI_IOS)),
++	    (rd(SE(GENI_IOS)) >> 1) & 1u, bt.rxn, bt.rxn ? ":" : "", bt_hex(bt.rx, bt.rxn));
++}
++
++/* ---- steps 6 and 7: HCI ---- */
++
++/*
++ * First H4 event in bt.rx that answers `op` (Command Complete or Command Status of that opcode; for OP_EDL also the
++ * vendor event form of the version answer, 00 02 ...) or a Hardware Error event: its offset, or -1 when none is
++ * complete yet. Other events stay in the raw dump.
++ */
++static int
++bt_find_event(uint16_t op, uint32_t *evlen)
++{
++	uint32_t i = 0;
++	while (i < bt.rxn) {
++		if (bt.rx[i] != H4_EVT) {
++			i++;                    /* IBS bytes (0xfc/0xfd/0xfe) or noise */
++			continue;
++		}
++		if (i + 3u > bt.rxn) {
++			return -1;
++		}
++		uint8_t evt = bt.rx[i + 1u];
++		uint32_t plen = bt.rx[i + 2u], n = 3u + plen;
++		if (i + n > bt.rxn) {
++			return -1;
++		}
++		const uint8_t *p = bt.rx + i + 3u;
++		if ((evt == EV_CMD_COMPLETE && plen >= 3u && le16(p + 1) == op) ||
++		    (evt == EV_CMD_STATUS && plen >= 4u && le16(p + 2) == op) ||
++		    (evt == EV_VENDOR && op == OP_EDL && plen >= 2u && p[0] == 0 && p[1] == EDL_APP_VER_RES) ||
++		    evt == EV_HW_ERROR) {
++			*evlen = n;
++			return (int)i;
++		}
++		i += n;
++	}
++	return -1;
++}
++
++/* send an H4 command, then poll RX for up to `ms` ms; the answer's offset in bt.rx or -1 */
++static int
++bt_hci(const char *step, const uint8_t *cmd, uint32_t len, uint16_t op, uint32_t ms, uint32_t *evlen)
++{
++	bt_rx_drain();
++	if (bt.rxn) {
++		hakios_tl("RM BT: %s %u bytes on the line before the command:%s\n", step, bt.rxn, bt_hex(bt.rx, bt.rxn));
++	}
++	bt.rxn = 0;
++	hakios_tl("RM BT: %s send%s\n", step, bt_hex(cmd, len));
++	int e = bt_uart_write(cmd, len);
++	if (e == ETIMEDOUT && !bt.cts_ignored) {
++		hakios_tl("RM BT: %s CTS held by the controller: again with CTS ignored\n", step);
++		wr(SE(UART_TX_TRANS_CFG), rd(SE(UART_TX_TRANS_CFG)) | UART_CTS_MASK);
++		bt.cts_ignored = true;
++		e = bt_uart_write(cmd, len);
++	}
++	if (e) {
++		hakios_tl("RM BT: %s UART write failed, errno %d\n", step, e);
++		return -1;
++	}
++	uint64_t t0 = bt_us(), end = t0 + (uint64_t)ms * 1000u;
++	int at = -1;
++	do {
++		bt_rx_drain();
++		at = bt_find_event(op, evlen);
++		if (at >= 0) {
++			break;
++		}
++		bt_spin_us(1000);
++	} while (bt_us() < end);
++	hakios_tl("RM BT: %s %u bytes back in %llu ms%s%s (RX restarts %u, S_IRQ seen %#x)\n", step, bt.rxn,
++	    (bt_us() - t0) / 1000u, bt.rxn ? ":" : "", bt_hex(bt.rx, bt.rxn), bt.rx_restarts, bt.s_irq_seen);
++	return at;
++}
++
++static bool
++bt_reset(void)
++{
++	static const uint8_t cmd[] = { H4_CMD, 0x03, 0x0c, 0x00 };
++	static const uint8_t ok[] = { H4_EVT, EV_CMD_COMPLETE, 0x04, 0x01, 0x03, 0x0c, 0x00 };
++	uint32_t n = 0;
++	int at = bt_hci("6 HCI_Reset:", cmd, sizeof(cmd), OP_RESET, 2000, &n);
++
++	if (at < 0) {
++		hakios_tl("RM BT: 6 HCI_Reset: no answer within 2 s; once more (the ROM may have been booting)\n");
++		mondrian_log_flush_now();
++		at = bt_hci("6 HCI_Reset (2nd):", cmd, sizeof(cmd), OP_RESET, 2000, &n);
++	}
++	if (at < 0) {
++		hakios_tl("RM BT: 6 HCI_Reset: NO answer (2 tries of 2 s)\n");
++		return false;
++	}
++	const uint8_t *e = bt.rx + at;
++	if (n == sizeof(ok) && memcmp(e, ok, sizeof(ok)) == 0) {
++		hakios_tl("RM BT: 6 HCI_Reset: Command Complete, status 0 (04 0e 04 01 03 0c 00): the controller answers\n");
++		return true;
++	}
++	if (e[1] == EV_CMD_COMPLETE) {
++		hakios_tl("RM BT: 6 HCI_Reset: Command Complete with status %#x:%s\n", n > 6 ? e[6] : 0xffu, bt_hex(e, n));
++	} else if (e[1] == EV_CMD_STATUS) {
++		hakios_tl("RM BT: 6 HCI_Reset: Command Status %#x:%s\n", e[3], bt_hex(e, n));
++	} else {
++		hakios_tl("RM BT: 6 HCI_Reset: event %#x instead (0x10 = Hardware Error):%s\n", e[1], bt_hex(e, n));
++	}
++	return false;
++}
++
++/* btqca.c qca_read_soc_version as 0331 read_version: Command Complete form (15+ bytes) or vendor event form */
++static bool
++bt_version(void)
++{
++	static const uint8_t cmd[] = { H4_CMD, 0x00, 0xfc, 0x01, EDL_VER_REQ };
++	uint32_t n = 0;
++	int at = bt_hci("7 QCA version (0xfc00 0x19):", cmd, sizeof(cmd), OP_EDL, 2000, &n);
++
++	if (at < 0) {
++		hakios_tl("RM BT: 7 QCA version: NO answer within 2 s\n");
++		return false;
++	}
++	const uint8_t *e = bt.rx + at, *v = NULL;
++	uint32_t plen = e[2];
++	if (e[1] == EV_CMD_COMPLETE && plen >= 3u + 15u && e[6] == 0 && e[7] == EDL_VER_REQ) {
++		v = e + 6 + 3;          /* return parameters: status, 0x19, length?, then the version */
++	} else if (e[1] == EV_VENDOR && plen >= 14u && e[3] == 0 && e[4] == EDL_APP_VER_RES) {
++		v = e + 3 + 2;
++	}
++	if (!v) {
++		hakios_tl("RM BT: 7 QCA version: answer not understood (event %#x, plen %u):%s\n", e[1], plen, bt_hex(e, n));
++		return false;
++	}
++	uint32_t product = le32(v), soc = le32(v + 8);
++	uint16_t patch = le16(v + 4), rom = le16(v + 6);
++	uint32_t soc_ver = soc << 16 | rom;
++	uint32_t fw_rom = ((soc_ver & 0xf00u) >> 4) | (soc_ver & 0xfu);
++	hakios_tl("RM BT: 7 QCA product %#010x, SoC %#010x, ROM %#06x, patch %#06x (%s): controller version %#010x, "
++	    "firmware files hpbtfw%02x.tlv / hpnv%02x%s\n", product, soc, rom, patch,
++	    e[1] == EV_CMD_COMPLETE ? "Command Complete" : "vendor event", soc_ver, fw_rom, fw_rom,
++	    (soc & 0xff00u) == 0x1200u ? "g.*" : ".*");
++	return soc != 0 && rom != 0;
++}
++
++/* ---- thread ---- */
++
++static void
++rm_bt_thread(void *arg, wait_result_t w)
++{
++	static const uint32_t pages[] = {
++		TLMM(PIN_CTS), TLMM(PIN_RTS), TLMM(PIN_TX), TLMM(PIN_RX), TLMM(PIN_WLAN_EN), TLMM(PIN_BT_EN),
++		TLMM(PIN_SW_CTRL), TLMM(PIN_XO), GCC_VOTE, CBCR_CORE2X, CBCR_S_AHB, RCG + RCG_PERF_N_DFSR(RCG_LEVELS - 1u),
++		QUP_HW_VER, SE(0), SE(GENI_IOS), SE(SE_DMA_GENERAL_CFG),
++	};
++	bool clocks = false, se = false, reset = false, version = false;
++
++	(void)arg;
++	(void)w;
++	{
++		/* let the station settle first: 3 s asleep (a deadline wait works on this board; a 3 s spin held a CPU) */
++		uint64_t deadline = 0;
++		nanoseconds_to_absolutetime(3ull * NSEC_PER_SEC, &deadline);
++		deadline += mach_absolute_time();
++		assert_wait_deadline((event_t)&rm_bt_started, THREAD_UNINT, deadline);
++		thread_block(THREAD_CONTINUE_NULL);
++	}
++	hakios_tl("RM BT: stage A start (iOSPlus10 0330/0334 port): QCA6490 Bluetooth on QUP2 SE5 @0x894000\n");
++	for (unsigned i = 0; i < sizeof(pages) / sizeof(pages[0]); i++) {
++		if (!rm_bt_mapped(pages[i])) {
++			hakios_tl("RM BT: stop: %#x is not in umi_pcie_regions[] or not mapped; nothing touched\n", pages[i]);
++			mondrian_log_flush_now();
++			return;
++		}
++	}
++
++	hakios_tl("RM BT: step 1 census (read-only)\n");
++	bt_census();
++	mondrian_log_flush_now();
++
++	hakios_tl("RM BT: step 2 QUP2 clocks (vote, S5 RCG, CBCR CLK_OFF = 0)\n");
++	clocks = bt_clocks();
++	mondrian_log_flush_now();
++	if (!clocks) {
++		hakios_tl("RM BT: stop: step 2: a QUP2 clock does not come on; the SE is not touched\n");
++		bt_clocks_undo();
++		goto out;
++	}
++
++	hakios_tl("RM BT: step 3 UART pins\n");
++	bt_pins();
++	mondrian_log_flush_now();
++
++	hakios_tl("RM BT: step 4 GENI SE5 as UART (clocks on: m_ahb %#x s_ahb %#x s5 %#x)\n", rd(CBCR_M_AHB),
++	    rd(CBCR_S_AHB), rd(CBCR_S5));
++	mondrian_log_flush_now();
++	se = bt_se_init();
++	mondrian_log_flush_now();
++	if (!se) {
++		goto out;
++	}
++
++	hakios_tl("RM BT: step 5 power: BT_EN gpio81 high\n");
++	bt_power();
++	mondrian_log_flush_now();
++
++	hakios_tl("RM BT: step 6 HCI_Reset at 115200\n");
++	reset = bt_reset();
++	mondrian_log_flush_now();
++
++	if (reset) {
++		hakios_tl("RM BT: step 7 QCA version\n");
++		version = bt_version();
++		mondrian_log_flush_now();
++	}
++out:
++	hakios_tl("RM BT: stage A summary: clocks %s, SE5 %s (protocol %u, %u Hz / %u, oversampling %u), BT_EN %u, "
++	    "SW_CTRL %u, CTS %s, HCI_Reset %s, version %s; RX %u bytes (%u dropped); everything stays as it is\n",
++	    clocks ? "on" : "FAILED", se ? "UART ready" : "not ready", (bt.fw >> 8) & 0xffu, bt.clk_hz, bt.clk_div,
++	    bt.sampling, (rd(TLMM(PIN_BT_EN) + 4u) >> 1) & 1u, rd(TLMM(PIN_SW_CTRL) + 4u) & 1u,
++	    bt.cts_ignored ? "ignored" : "used", reset ? "OK" : "no", version ? "OK" : "no", bt.rx_total, bt.rx_dropped);
++	mondrian_log_flush_now();
++}
++
++/* From umi_wifi.c's normal session, once the station is ready. /chosen mondrian-rmbt: 1 = run stage A. */
++void
++rm_bt_start(void)
++{
++	uint32_t mode = 0;
++	DTEntry chosen;
++	void const *prop = NULL;
++	unsigned int size = 0;
++	thread_t thread;
++
++	if (SecureDTLookupEntry(NULL, "/chosen", &chosen) == kSuccess &&
++	    SecureDTGetProperty(chosen, "mondrian-rmbt", &prop, &size) == kSuccess && size == 4) {
++		mode = *(const uint32_t *)prop;
++	}
++	if (mode != 1) {
++		hakios_tl("RM BT: stage A off (/chosen mondrian-rmbt = %u)\n", mode);
++		return;
++	}
++	if (os_atomic_xchg(&rm_bt_started, true, relaxed)) {
++		return;                 /* once per boot */
++	}
++	if (kernel_thread_start(rm_bt_thread, NULL, &thread) == KERN_SUCCESS) {
++		thread_deallocate(thread);
++		hakios_tl("RM BT: stage A thread started\n");
++	} else {
++		hakios_tl("RM BT: stage A thread could not start\n");
++	}
++}
++#endif /* MONDRIAN */
 diff --git a/bsd/dev/rmwifi/rm_glue.c b/bsd/dev/rmwifi/rm_glue.c
 new file mode 100644
 index 000000000..561e0dcdf
@@ -23247,10 +25509,10 @@ index 000000000..379f1af03
 +}
 diff --git a/bsd/dev/rmwifi/umi_wifi.c b/bsd/dev/rmwifi/umi_wifi.c
 new file mode 100644
-index 000000000..96865c3c0
+index 000000000..15aaa78ef
 --- /dev/null
 +++ b/bsd/dev/rmwifi/umi_wifi.c
-@@ -0,0 +1,1156 @@
+@@ -0,0 +1,1357 @@
 +/* Xiaomi Mi 10 QCA6390 / PCIe0 bring-up. Addresses are from UMI's DTB.
 + * umi_wifi_step=1 is a read-only survey of always-accessible GCC and TLMM.
 + * It deliberately does not read the powered-down PCIe or radio aperture.
@@ -23259,6 +25521,7 @@ index 000000000..96865c3c0
 +#include <kern/clock.h>
 +#include <kern/locks.h>
 +#include <kern/thread.h>
++#include <kern/sched_prim.h>     /* v201: assert_wait_deadline, thread_block */
 +#include <os/atomic_private.h>
 +#include <mach/mach_types.h>
 +#include <machine/machine_routines.h>
@@ -23280,6 +25543,7 @@ index 000000000..96865c3c0
 +extern void loader_return(void);
 +extern int umi_rpmh_wifi_power(void);
 +extern int hakios_wifi_umi_smmu_test(void);
++static void rm_probe_radios(void);      /* RedMagic v180 */
 +bool umi_wifi_init(void);
 +
 +#define UMI_QRTR_SERVICE_MAX 16u
@@ -23857,6 +26121,10 @@ index 000000000..96865c3c0
 +	{ 0x60100000, 0x1000, 0 },  /* endpoint configuration */
 +	{ 0x60400000, 0x10000, 0 },  /* v151: the radio BAR's first 64 KiB (MHI and BHI registers: all step 2 reads) */
 +	{ 0x60480000, 0x1000, 0 },   /* v164: BAR + 0x80000, the remap window (BAR + 0x310c) page: WLAON_QFPROM_PWR_CTRL at 0x8031c */
++	/* Bluetooth stage A (rm_bt.c, iOSPlus10 0330/0334 port): only the pages it touches */
++	{ 0x0f100000 + 76 * 0x1000, 0x4000, 0 },   /* gpio76..79: BT UART CTS, RTS, TX, RX (qupv3_se20_4uart) */
++	{ 0x00894000, 0x1000, 0 },  /* QUP wrapper 2 SE5, the BT UART: GENI registers 0x000..0xe30 */
++	{ 0x008c0000, 0x1000, 0 },  /* QUP wrapper 2 common page: QUP_HW_VER at +4 */
 +};
 +
 +static vm_offset_t
@@ -23894,6 +26162,37 @@ index 000000000..96865c3c0
 +	__asm__ volatile("dsb osh" ::: "memory");
 +}
 +
++/*
++ * Bluetooth stage A (rm_bt.c) reads and writes through this table too. rm_bt_mapped: the 32-bit word at `address` is
++ * inside a region that is mapped (umi_pcie_register alone would hand back the offset of an unmapped region).
++ */
++bool rm_bt_mapped(uint32_t address);
++uint32_t rm_bt_read32(uint32_t address);
++void rm_bt_write32(uint32_t address, uint32_t value);
++
++bool
++rm_bt_mapped(uint32_t address)
++{
++	for (unsigned i = 0; i < sizeof(umi_pcie_regions) / sizeof(umi_pcie_regions[0]); i++) {
++		uint32_t offset = address - umi_pcie_regions[i].address;
++		if (offset <= umi_pcie_regions[i].size - 4)
++			return umi_pcie_regions[i].mapping != 0 && (address & 3) == 0;
++	}
++	return false;
++}
++
++uint32_t
++rm_bt_read32(uint32_t address)
++{
++	return umi_pcie_read(NULL, address);
++}
++
++void
++rm_bt_write32(uint32_t address, uint32_t value)
++{
++	umi_pcie_write(NULL, address, value);
++}
++
 +static int
 +umi_pcie_power(void *context)
 +{
@@ -23913,6 +26212,20 @@ index 000000000..96865c3c0
 +	uint64_t ticks = 0, end;
 +	nanoseconds_to_absolutetime((uint64_t)us * 1000ull, &ticks);
 +	end = mach_absolute_time() + ticks;
++	/*
++	 * RedMagic v201: a wait of 200 us or more sleeps to its deadline when the thread may block (deadline sleeps
++	 * fire on this board: v198's GPU waits). The MHI/QRTR receive and send loops (umi_mhi.c) poll the event
++	 * rings with a 1 ms wait between looks; spun, it kept Wi-Fi's control channel at ~9 % of the big cores
++	 * all the time (v200's kernel profile: umi_pcie_delay the hottest kernel function after the idle loop).
++	 */
++	if (us >= 200 && preemption_enabled() && !ml_at_interrupt_context()) {
++		static int umi_delay_event;
++		while (mach_absolute_time() < end) {
++			assert_wait_deadline((event_t)&umi_delay_event, THREAD_UNINT, end);
++			thread_block(THREAD_CONTINUE_NULL);
++		}
++		return;
++	}
 +	while (mach_absolute_time() < end) {
 +		__asm__ volatile("yield");
 +	}
@@ -24122,6 +26435,12 @@ index 000000000..96865c3c0
 +				error = hakios_lx_start();
 +				if (!error && umi_normal_session) {
 +					hakios_tl("UMI Wi-Fi: station ready for iOS Wi-Fi requests\n");
++					{
++						/* Bluetooth stage A: only now (BT_EN during the PCIe power-up stopped the
++						 * link), on its own thread; /chosen mondrian-rmbt = 1 (default off) */
++						extern void rm_bt_start(void);
++						rm_bt_start();
++					}
 +					while (os_atomic_load(&umi_service_wanted, acquire) &&
 +					    !os_atomic_load(&umi_poll_finished, acquire)) {
 +						struct timespec pause = { .tv_sec = 0, .tv_nsec = 100 * NSEC_PER_MSEC };
@@ -24342,6 +26661,7 @@ index 000000000..96865c3c0
 +	if (wait != 0) {
 +		umi_pcie_delay(NULL, wait * 1000000u);
 +	}
++	rm_probe_radios();      /* v180: Bluetooth UART clocks, SMEM partitions and items (read-only) */
 +	if (step == 11) {
 +		/*
 +		 * v168: the normal session, as umi_wifi_init does it for wifi=1: en0 made now (with the IOKit nub iOS finds
@@ -24362,6 +26682,149 @@ index 000000000..96865c3c0
 +	hakios_tl("RM WIFI: step %u: PCIe0 bring-up, DMA disabled\n", step);
 +	int error = umi_wifi_pcie_diagnostic(step <= 10 ? step : 2);   /* v163: the step asked for (v162 always ran 2) */
 +	hakios_tl("RM WIFI: step %u done, errno=%d (endpoint back in reset)\n", step, error);
++	extern void mondrian_log_flush_now(void);
++	mondrian_log_flush_now();
++}
++
++/*
++ * RedMagic v180: read-only probes for the next radios, logged at the start of the Wi-Fi thread.
++ *
++ * Bluetooth: the QCA6490's Bluetooth half talks HCI over a UART, QUPv3 wrapper 2 serial engine 5 at 0x894000
++ * (Android: qcom,msm-geni-serial-hs, /dev/ttyHS0). Its GCC clocks (gcc-sm8450.c) are read; the engine's own
++ * registers only when its AHB clocks are already on (an unclocked read can end the kernel). Nothing is enabled.
++ *
++ * Cellular: SMEM (0x80900000, 2 MiB, the same on SM8450), 4 KiB pages mapped as they are needed (a 2 MiB mapping
++ * fails here): the boot loader's table of partitions (one per pair of processors; the modem is host 1) and the
++ * items of the global partition, with the image version table (item 469) as text.
++ */
++#define RM_GCC                  0x00100000u
++#define RM_SMEM_PHYS            0x80900000ull
++#define RM_SMEM_SIZE            0x00200000u
++
++static vm_offset_t rm_smem_pages[RM_SMEM_SIZE / 0x1000];
++
++static bool
++rm_smem_read(uint32_t offset, void *to, uint32_t size)
++{
++	if (offset + size > RM_SMEM_SIZE || offset + size < offset) return false;
++	for (uint32_t i = 0; i < size; i++) {
++		uint32_t at = offset + i, page = at / 0x1000;
++		if (rm_smem_pages[page] == 0) {
++			rm_smem_pages[page] = ml_io_map(RM_SMEM_PHYS + (uint64_t)page * 0x1000, 0x1000);
++			if (rm_smem_pages[page] == 0) return false;
++		}
++		((uint8_t *)to)[i] = *(const volatile uint8_t *)(rm_smem_pages[page] + (at & 0xfff));
++	}
++	return true;
++}
++
++static void
++rm_probe_radios(void)
++{
++	static const struct { const char *name; uint32_t reg; } clocks[] = {
++		{ "qupv3 wrap2 core 2x", 0x3328c }, { "qupv3 wrap2 core", 0x33280 }, { "qupv3 wrap2 s5 (BT UART)", 0x2e610 },
++		{ "qupv3 wrap 2 m ahb", 0x2e004 }, { "qupv3 wrap 2 s ahb", 0x2e008 },
++	};
++	bool ahb = true;
++	uint32_t word = 0;
++
++	for (unsigned i = 0; i < sizeof(clocks) / sizeof(clocks[0]); i++) {
++		uint32_t v = umi_pcie_read(NULL, RM_GCC + clocks[i].reg);
++		hakios_tl("RM BT: GCC %s CBCR (+%#x) = %#x: %s\n", clocks[i].name, clocks[i].reg, v,
++		    v == UINT32_MAX ? "unreadable" : (v & 0x80000000u) ? "OFF" : "on");
++		if (i >= 3 && (v == UINT32_MAX || (v & 0x80000000u))) ahb = false;
++	}
++	hakios_tl("RM BT: GCC QUP vote register (+0x62010) = %#x\n", umi_pcie_read(NULL, RM_GCC + 0x62010));
++	{
++		/*
++		 * RedMagic v185: the panel's refresh as it runs now: rising edges of its TE line (gpio86, live.dts
++		 * qcom,platform-te-gpio) over 200 ms, read from the TLMM input bit. The vdtr6130 has 60/90/120/144/165 Hz
++		 * modes; the boot loader picks one.
++		 */
++		vm_offset_t te = ml_io_map(0x0f100000 + 86 * 0x1000, 0x1000);
++		if (te != 0) {
++			uint64_t ticks = 0, end;
++			uint32_t edges = 0, last = *(volatile uint32_t *)(te + 4) & 1u, highs = 0, samples = 0;
++			nanoseconds_to_absolutetime(200000000ull, &ticks);
++			end = mach_absolute_time() + ticks;
++			while (mach_absolute_time() < end) {
++				uint32_t v = *(volatile uint32_t *)(te + 4) & 1u;
++				edges += (v && !last);
++				highs += v;
++				samples++;
++				last = v;
++			}
++			hakios_tl("RM PANEL: TE gpio86 cfg %#x: %u rising edges in 200 ms = ~%u Hz (high %u of %u samples)\n",
++			    *(volatile uint32_t *)te, edges, edges * 5u, highs, samples);
++		}
++	}
++	if (ahb) {
++		vm_offset_t se = ml_io_map(0x894000, 0x1000);
++		if (se != 0) {
++			hakios_tl("RM BT: GENI SE5 @0x894000: FW revision %#x (protocol %u: 2 = UART), status %#x, clock select %#x, "
++			    "HW params %#x %#x\n", *(volatile uint32_t *)(se + 0x68), (*(volatile uint32_t *)(se + 0x68) >> 8) & 0xff,
++			    *(volatile uint32_t *)(se + 0x40), *(volatile uint32_t *)(se + 0x7c), *(volatile uint32_t *)(se + 0xe24),
++			    *(volatile uint32_t *)(se + 0xe28));
++		}
++	} else {
++		hakios_tl("RM BT: the UART's AHB clocks are off: its registers are not read\n");
++	}
++
++	/* SMEM: the version word of the old header, then the table of partitions in the last 4 KiB */
++	if (rm_smem_read(0x40 + 4 * 7, &word, 4)) {
++		hakios_tl("RM MODEM: SMEM version word %#x (boot loader's version %u: 12 = partitions)\n", word, word >> 16);
++	} else {
++		hakios_tl("RM MODEM: SMEM could not be read\n");
++		return;
++	}
++	struct { uint8_t magic[4]; uint32_t version, count, reserved[5]; } toc;
++	if (!rm_smem_read(RM_SMEM_SIZE - 0x1000, &toc, sizeof(toc)) || memcmp(toc.magic, "$TOC", 4) != 0) {
++		hakios_tl("RM MODEM: SMEM has no table of partitions\n");
++		return;
++	}
++	hakios_tl("RM MODEM: SMEM table of partitions: version %u, %u partitions\n", toc.version, toc.count);
++	uint32_t global_offset = 0, global_size = 0;
++	for (uint32_t i = 0; i < toc.count && i < 32; i++) {
++		struct { uint32_t offset, size, flags; uint16_t host0, host1; uint32_t cacheline, reserved[7]; } e;
++		if (!rm_smem_read(RM_SMEM_SIZE - 0x1000 + 32 + i * 48, &e, sizeof(e))) break;
++		hakios_tl("RM MODEM: SMEM partition %u: hosts %u and %u, at %#x, %#x bytes, flags %#x, cache line %u\n", i,
++		    e.host0, e.host1, e.offset, e.size, e.flags, e.cacheline);
++		if (e.host0 == 0xfffe && e.host1 == 0xfffe) {
++			global_offset = e.offset;
++			global_size = e.size;
++		}
++	}
++	if (global_offset == 0) return;
++	struct { uint8_t magic[4]; uint16_t host0, host1; uint32_t size, free_uncached, free_cached, reserved[3]; } part;
++	if (!rm_smem_read(global_offset, &part, sizeof(part)) || memcmp(part.magic, "$PRT", 4) != 0) {
++		hakios_tl("RM MODEM: SMEM global partition has no header\n");
++		return;
++	}
++	hakios_tl("RM MODEM: SMEM global partition: %#x bytes, items up to %#x\n", part.size, part.free_uncached);
++	uint32_t at = 32, items = 0;
++	while (at + 16 <= part.free_uncached && at < global_size && items < 80) {
++		struct { uint16_t canary, item; uint32_t size; uint16_t padding_data, padding_header; uint32_t reserved; } it;
++		if (!rm_smem_read(global_offset + at, &it, sizeof(it)) || it.canary != 0xa5a5) {
++			hakios_tl("RM MODEM: SMEM item walk stopped at %#x (canary %#x)\n", at, it.canary);
++			break;
++		}
++		uint32_t data = global_offset + at + 16 + it.padding_header;
++		items++;
++		if (it.item == 469) {
++			/* the image version table: entries of 128 bytes, a name and a version string in each */
++			hakios_tl("RM MODEM: SMEM item 469 (image versions), %u bytes:\n", it.size);
++			for (uint32_t e = 0; e < it.size / 128 && e < 32; e++) {
++				char line[129];
++				if (!rm_smem_read(data + e * 128, line, 128)) break;
++				line[128] = 0;
++				for (int k = 0; k < 128; k++) if (line[k] != 0 && (line[k] < 0x20 || line[k] > 0x7e)) line[k] = '.';
++				if (line[0] != 0) hakios_tl("RM MODEM:   %u: %s\n", e, line);
++			}
++		} else {
++			hakios_tl("RM MODEM: SMEM item %u, %u bytes\n", it.item, it.size);
++		}
++		at += 16 + it.padding_header + it.size;
++	}
 +	extern void mondrian_log_flush_now(void);
 +	mondrian_log_flush_now();
 +}
@@ -24603,10 +27066,10 @@ index a7cc1e624..26b627f0a 100644
  #else
  __XNU_PRIVATE_EXTERN int do_coredump = 1;       /* default: dump cores */
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
-index f41b75bf2..bed2d5948 100644
+index f41b75bf2..23391f9a8 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -5568,6 +5568,77 @@ bad:
+@@ -5568,6 +5568,79 @@ bad:
   * Note:	The argument and environment vectors are user space pointers
   *		to arrays of user space pointers.
   */
@@ -24664,7 +27127,9 @@ index f41b75bf2..bed2d5948 100644
 +	}
 +	/* v148: the apps that do not draw, or draw wrong (the user's list): their hangs, stacks and os_log */
 +	if (wanted == 0) {
-+		static const char *const apps[] = { "MobileNotes", "FaceTime", "AppleTV", "Passbook", "Podcasts", "News", "Maps", "MobilePhone", "Measure", "Magnifier", "MobileSafari", "VoiceMemos", "Compass", "accountsd", "wifid" };
++		static const char *const apps[] = { "MobileNotes", "FaceTime", "AppleTV", "Passbook", "Podcasts", "News", "Maps", "MobilePhone", "Measure", "Magnifier", "MobileSafari", "VoiceMemos", "Compass", "accountsd", "wifid",
++		    "lockdownd" /* v190: never answers accountsd's lockdown_copy_value */,
++		    "passd", "vmd", "mediaserverd" /* v191: Wallet, Phone and the camera apps wait on them */ };
 +		for (unsigned a = 0; a < sizeof(apps) / sizeof(apps[0]); a++) {
 +			size_t l = strlen(apps[a]);
 +			if (imgp->ip_ndp->ni_cnd.cn_namelen == (int)l && strncmp(name, apps[a], l) == 0) {
@@ -24684,7 +27149,7 @@ index f41b75bf2..bed2d5948 100644
  __attribute__((noinline))
  static int
  exec_extract_strings(struct image_params *imgp)
-@@ -5741,6 +5812,27 @@ exec_extract_strings(struct image_params *imgp)
+@@ -5741,6 +5814,27 @@ exec_extract_strings(struct image_params *imgp)
  		imgp->ip_envc++;
  	}
  
@@ -24712,7 +27177,7 @@ index f41b75bf2..bed2d5948 100644
  	/* Save space for envv[] NULL terminator */
  	if (imgp->ip_argspace < new_ptr_size) {
  		error = E2BIG;
-@@ -7411,9 +7503,14 @@ process_signature(proc_t p, struct image_params *imgp)
+@@ -7411,9 +7505,14 @@ process_signature(proc_t p, struct image_params *imgp)
  				error = EACCES;
  				goto done;
  			}
@@ -123812,10 +126277,10 @@ index 000000000..b294479de
 +#endif /* MONDRIAN */
 diff --git a/iokit/Kernel/arm/MondrianFramebuffer.cpp b/iokit/Kernel/arm/MondrianFramebuffer.cpp
 new file mode 100644
-index 000000000..d212c98a9
+index 000000000..dfde6b2f5
 --- /dev/null
 +++ b/iokit/Kernel/arm/MondrianFramebuffer.cpp
-@@ -0,0 +1,1448 @@
+@@ -0,0 +1,2078 @@
 +/*
 + * Built-in IOMobileFramebuffer for MONDRIAN: the ABL's continuous-splash
 + * framebuffer (1440x3200 a8r8g8b8 in RAM, the panel scans it out by
@@ -123885,7 +126350,14 @@ index 000000000..d212c98a9
 +#define MONDRIAN_FB_LAYERS                 4
 +#define MONDRIAN_FB_NOTIFY_TYPES           8
 +#define MONDRIAN_FB_NOTIFY_VSYNC           5
-+#define MONDRIAN_FB_VSYNC_US               16667
++/*
++ * RedMagic v207: the refresh rate is the panel's, measured on its TE at start (mondrian_panel_rate): 90 Hz unless
++ * rmpanel_hz=60 switches the panel down. The vsync timer, the published display mode (TimingElements) and the
++ * once-a-second and five-second jobs counted in vsyncs all follow it.
++ */
++static uint32_t mondrian_fb_hz = 60;
++extern "C" uint32_t mondrian_fb_period_ns;     /* v211: kern.mondrian_fb_period_ns (bsd/dev/mondrian_gpu.c) */
++#define MONDRIAN_FB_VSYNC_US               (1000000u / mondrian_fb_hz)
 +#define MONDRIAN_FB_DOT_PITCH              526     /* ppi, 6.67" 1440x3200 */
 +#define MONDRIAN_FB_FORMAT_BGRA            0x42475241
 +/* bsd/dev/mondrian_sample.c: the sampler, ticked from this driver's timer. */
@@ -123895,8 +126367,12 @@ index 000000000..d212c98a9
 +/* osfmk/arm64/mondrian_early.c: the console's mapping of the panel. */
 +extern "C" uint64_t mondrian_early_fb_va(void);
 +extern "C" vm_offset_t ml_io_map(vm_offset_t phys_addr, vm_size_t size);
++extern "C" void sched_perfcontrol_update_recommended_cores(uint32_t recommended_cores);
++extern "C" void mondrian_gpu_uc_wait_mode(uint32_t step_us);      /* v198 */
++extern "C" void mondrian_gpu_uc_wait_kick(void);
++extern "C" void mondrian_cpu_busy_percent(uint8_t out[8]);
 +
-+#define MONDRIAN_FB_REFRESH_HZ             60
++#define MONDRIAN_FB_REFRESH_HZ             mondrian_fb_hz
 +#define MONDRIAN_FB_TIMING_ID              1
 +#define MONDRIAN_FB_COLOR_ID               1
 +
@@ -124128,6 +126604,500 @@ index 000000000..d212c98a9
 +	    (st & 1u) ? "done" : "NO done flag", st, ctrl, dmaCtrl, trig, spins);
 +}
 +
++
++/*
++ * RedMagic v187: the panel at 60 Hz and the vsync locked to it. The boot loader starts the vdtr6130 in its first
++ * timing (live.dts timing@0: 90 Hz), measured on TE (gpio86) at 18 edges in 200 ms, while our vsync is a free 60 Hz
++ * timer: two iOS frames per three panel refreshes, each frame on screen for 11 or 22 ms in turn. Here: the panel's
++ * 60 Hz timing (timing@1, its timing-switch command: six DCS long writes in low-power mode), the display
++ * controller's tear-check line clock for 60 Hz when it reads as expected (INTF_1 at 0xae36000: TEAR_SYNC_CONFIG_VSYNC
++ * 0x284, count = 19.2 MHz / (vtotal 2460 x rate)), then TE watched again: its period and the time of a rising edge
++ * become the vsync timer's period and phase, a vsync just after each TE (mondrianfb_te_us, default 500 us).
++ * Boot-args: rmpanel_hz=90 leaves the panel as the boot loader set it; mondrianfb_telock=0 keeps the free timer.
++ */
++#define RM_TE_GPIO_PA      (0x0f100000ULL + 86 * 0x1000)
++#define RM_INTF1           0x0ae36000ULL
++#define RM_INTF_TEAR_EN    0x280
++#define RM_INTF_TEAR_VSYNC 0x284
++#define RM_INTF_TEAR_HGT   0x288
++#define RM_INTF_TEAR_INIT  0x290
++#define RM_INTF_TEAR_THR   0x298
++#define RM_INTF_TEAR_START 0x29c
++#define RM_INTF_TEAR_LINE  0x2a8
++#define RM_INTF_TEAR_AUTO  0x2b4
++#define RM_PP0             0x0ae6a000ULL
++
++static vm_offset_t mondrian_te_va;
++static uint64_t mondrian_te_period;    /* host ticks between TE rising edges; 0 = not locked */
++static uint64_t mondrian_te_width;     /* host ticks TE stays high */
++static uint64_t mondrian_te_rise;      /* host time of a rising edge */
++static uint64_t mondrian_te_offset;    /* host ticks from a rising edge to the vsync */
++
++static inline uint32_t
++mondrian_te_level(void)
++{
++	return *(volatile uint32_t *)(mondrian_te_va + 4) & 1u;
++}
++
++/* TE for `ms` milliseconds: rising edges seen; their mean period, the mean high time and the last edge's time */
++static uint32_t
++mondrian_te_measure(uint32_t ms, uint64_t *period, uint64_t *width, uint64_t *lastRise)
++{
++	uint64_t ticks = 0, first = 0, last = 0, riseAt = 0, highSum = 0;
++	uint32_t rises = 0, falls = 0;
++
++	nanoseconds_to_absolutetime((uint64_t)ms * 1000000ull, &ticks);
++	uint64_t now = mach_absolute_time();
++	const uint64_t end = now + ticks;
++	uint32_t prev = mondrian_te_level();
++	while ((now = mach_absolute_time()) < end) {
++		const uint32_t v = mondrian_te_level();
++		if (v && !prev) {
++			if (rises == 0) {
++				first = now;
++			}
++			last = now;
++			riseAt = now;
++			rises++;
++		} else if (!v && prev && riseAt != 0) {
++			highSum += now - riseAt;
++			falls++;
++		}
++		prev = v;
++	}
++	*period = rises > 1 ? (last - first) / (rises - 1) : 0;
++	*width = falls ? highSum / falls : 0;
++	*lastRise = last;
++	return rises;
++}
++
++static uint32_t
++mondrian_ticks_us(uint64_t t)
++{
++	uint64_t ns = 0;
++	absolutetime_to_nanoseconds(t, &ns);
++	return (uint32_t)(ns / 1000ull);
++}
++
++/* one DCS long write through DSI0's command DMA, as mondrian_panel_brightness sends its one */
++static bool
++mondrian_dsi_dcs(uintptr_t fbAlias, const uint8_t *payload, uint32_t len)
++{
++	if (fbAlias == 0 || len == 0 || len > 56) {
++		return false;
++	}
++	vm_offset_t dsi = ml_io_map(RM_DSI0, 0x400);
++	if (dsi == 0) {
++		return false;
++	}
++	volatile uint32_t *r = (volatile uint32_t *)dsi;
++	const uint32_t ctrl = r[RM_DSI_CTRL / 4], dmaCtrl = r[RM_DSI_DMA_CTRL / 4], trig = r[RM_DSI_TRIG_CTRL / 4];
++	if ((ctrl & 1u) == 0) {
++		return false;
++	}
++	volatile uint8_t *buf = (volatile uint8_t *)(fbAlias + RM_BRIGHT_BUF_OFF);
++	const uint32_t total = 4 + ((len + 3u) & ~3u);
++	buf[0] = (uint8_t)len;
++	buf[1] = (uint8_t)(len >> 8);
++	buf[2] = 0x39;                  /* DCS long write */
++	buf[3] = 0xc0;                  /* last, long */
++	for (uint32_t i = 0; i < total - 4; i++) {
++		buf[4 + i] = i < len ? payload[i] : 0xff;
++	}
++	__asm__ volatile("dsb sy" ::: "memory");
++	r[RM_DSI_TRIG_CTRL / 4] = (trig & ~7u) | 4u;
++	r[RM_DSI_DMA_CTRL / 4] = (dmaCtrl & ~((1u << 31) | (1u << 30))) | (1u << 28) | (1u << 26);
++	r[RM_DSI_INT_CTRL / 4] = r[RM_DSI_INT_CTRL / 4] | 1u;
++	r[RM_DSI_DMA_OFFSET / 4] = (uint32_t)RM_BRIGHT_BUF_PA;
++	r[RM_DSI_DMA_LEN / 4] = total;
++	__asm__ volatile("dsb sy" ::: "memory");
++	r[RM_DSI_DMA_TRIGGER / 4] = 1;
++	__asm__ volatile("dsb sy" ::: "memory");
++	uint32_t st = 0;
++	for (uint32_t spins = 0; spins < 400000; spins++) {
++		st = r[RM_DSI_INT_CTRL / 4];
++		if (st & 1u) {
++			break;
++		}
++	}
++	r[RM_DSI_INT_CTRL / 4] = st | 1u;
++	r[RM_DSI_DMA_CTRL / 4] = dmaCtrl;
++	r[RM_DSI_TRIG_CTRL / 4] = trig;
++	return (st & 1u) != 0;
++}
++
++static void
++mondrian_spin_us(uint32_t us)
++{
++	uint64_t ticks = 0;
++	nanoseconds_to_absolutetime((uint64_t)us * 1000ull, &ticks);
++	const uint64_t end = mach_absolute_time() + ticks;
++	while (mach_absolute_time() < end) {
++	}
++}
++
++/*
++ * RedMagic v198: the display controller as the bootloader left it, for the log -- which CTL drives INTF_1, the pipes
++ * staged on its mixers, each pipe's source (size, address, stride, format), the mixers' sizes -- and one flush that
++ * changes nothing, timed. The next step is the controller scaling the canvas itself (a VIG pipe's QSEED3) and taking
++ * each frame by its address, with no copy by the CPU; that needs to know the pipe in use and whether a flush is
++ * taken at the next frame with autorefresh pushing frames and nobody writing CTL_START. Registers by the live tree's
++ * offsets (qcom,sde-ctl-off, -mixer-off, -sspp-off) and Linux's dpu_hw_ctl.c / dpu_hw_sspp.c / dpu_hw_lm.c.
++ * 16 KB pages of the block are mapped as they are first read. Boot-arg rmdpu=0 leaves it out.
++ */
++#define RM_MDSS            0x0ae00000ULL
++#define RM_MDSS_PAGES      20           /* to 0x50000: top, the pipes, the CTLs, the mixers */
++static vm_offset_t mondrian_mdss_page[RM_MDSS_PAGES];
++
++static volatile uint32_t *
++mondrian_mdss_reg(uint32_t off)
++{
++	const uint32_t page = off >> 14;
++
++	if (page >= RM_MDSS_PAGES) {
++		return NULL;
++	}
++	if (mondrian_mdss_page[page] == 0) {
++		mondrian_mdss_page[page] = ml_io_map((vm_offset_t)(RM_MDSS + ((uint64_t)page << 14)), 0x4000);
++	}
++	return mondrian_mdss_page[page] != 0 ? (volatile uint32_t *)(mondrian_mdss_page[page] + (off & 0x3ffcu)) : NULL;
++}
++
++static uint32_t
++mondrian_mdss_rd(uint32_t off)
++{
++	volatile uint32_t *r = mondrian_mdss_reg(off);
++	return r != NULL ? *r : 0xdeadbeefu;
++}
++
++static void
++mondrian_dpu_dump(void)
++{
++	static const uint32_t ssppOff[8] = { 0x5000, 0x7000, 0x9000, 0xb000, 0x25000, 0x27000, 0x29000, 0x2b000 };
++	static const char *const ssppName[8] = { "VIG0", "VIG1", "VIG2", "VIG3", "DMA0", "DMA1", "DMA2", "DMA3" };
++	static const uint8_t ssppFlush[8] = { 0, 1, 2, 18, 11, 12, 24, 25 };
++	uint32_t on = 1, ctlAt = 0;
++	int pipe = -1;
++
++	PE_parse_boot_argn("rmdpu", &on, sizeof(on));
++	if (!on) {
++		return;
++	}
++	IOLog("MONDRIAN DPU: top hw %#x clk ctrl %#x %#x %#x %#x %#x %#x %#x %#x\n", mondrian_mdss_rd(0x1000),
++	    mondrian_mdss_rd(0x12ac), mondrian_mdss_rd(0x12b0), mondrian_mdss_rd(0x12b4), mondrian_mdss_rd(0x12b8),
++	    mondrian_mdss_rd(0x12bc), mondrian_mdss_rd(0x12c0), mondrian_mdss_rd(0x12c4), mondrian_mdss_rd(0x12c8));
++	for (uint32_t c = 0; c < 6; c++) {
++		const uint32_t b = 0x16000 + c * 0x1000;
++		const uint32_t intf = mondrian_mdss_rd(b + 0xf4), fetch = mondrian_mdss_rd(b + 0xfc);
++		uint32_t any = intf | fetch;
++
++		for (uint32_t lm = 0; lm < 6; lm++) {
++			any |= mondrian_mdss_rd(b + (lm == 5 ? 0x24 : lm * 4));
++		}
++		if (any == 0) {
++			continue;
++		}
++		if (ctlAt == 0 && (intf & 2u)) {
++			ctlAt = b;              /* the CTL with INTF_1 */
++		}
++		IOLog("MONDRIAN DPU: CTL_%u top %#x flush %#x intf active %#x master %#x fetch active %#x merge3d %#x dsc %#x\n", c,
++		    mondrian_mdss_rd(b + 0x14), mondrian_mdss_rd(b + 0x18), intf, mondrian_mdss_rd(b + 0x134), fetch,
++		    mondrian_mdss_rd(b + 0xe4), mondrian_mdss_rd(b + 0xe8));
++		for (uint32_t lm = 0; lm < 6; lm++) {
++			const uint32_t l = mondrian_mdss_rd(b + (lm == 5 ? 0x24 : lm * 4)), e = mondrian_mdss_rd(b + 0x40 + lm * 4),
++			    e2 = mondrian_mdss_rd(b + 0x70 + lm * 4), e3 = mondrian_mdss_rd(b + 0xa0 + lm * 4);
++			if ((l | e | e2 | e3) != 0) {
++				IOLog("MONDRIAN DPU: CTL_%u LM_%u layer %#x ext %#x ext2 %#x ext3 %#x\n", c, lm, l, e, e2, e3);
++			}
++		}
++	}
++	for (uint32_t m = 0; m < 6; m++) {
++		const uint32_t b = 0x45000 + m * 0x1000;
++		const uint32_t size = mondrian_mdss_rd(b + 0x4);
++
++		if (size == 0 || size == 0xdeadbeefu) {
++			continue;
++		}
++		IOLog("MONDRIAN DPU: LM_%u op %#x out %ux%u border %#x %#x; stage 0 op %#x alpha %#x, 1 op %#x alpha %#x, "
++		    "2 op %#x alpha %#x\n", m, mondrian_mdss_rd(b), size & 0xffffu, size >> 16, mondrian_mdss_rd(b + 0x8),
++		    mondrian_mdss_rd(b + 0xc), mondrian_mdss_rd(b + 0x20), mondrian_mdss_rd(b + 0x24), mondrian_mdss_rd(b + 0x38),
++		    mondrian_mdss_rd(b + 0x3c), mondrian_mdss_rd(b + 0x50), mondrian_mdss_rd(b + 0x54));
++	}
++	for (uint32_t s = 0; s < 8; s++) {
++		const uint32_t b = ssppOff[s];
++		const uint32_t size = mondrian_mdss_rd(b), addr = mondrian_mdss_rd(b + 0x14);
++
++		if (size == 0 && addr == 0 && s != 0) {
++			continue;
++		}
++		if (pipe < 0 && addr == 0xb8000000u && size != 0) {
++			pipe = (int)s;
++		}
++		IOLog("MONDRIAN DPU: %s src %ux%u at %u,%u out %ux%u at %u,%u addr %#x stride %#x format %#x unpack %#x op %#x "
++		    "const %#x fetch %#x\n", ssppName[s], size & 0xffffu, size >> 16, mondrian_mdss_rd(b + 0x8) & 0xffffu,
++		    mondrian_mdss_rd(b + 0x8) >> 16, mondrian_mdss_rd(b + 0xc) & 0xffffu, mondrian_mdss_rd(b + 0xc) >> 16,
++		    mondrian_mdss_rd(b + 0x10) & 0xffffu, mondrian_mdss_rd(b + 0x10) >> 16, addr, mondrian_mdss_rd(b + 0x24),
++		    mondrian_mdss_rd(b + 0x30), mondrian_mdss_rd(b + 0x34), mondrian_mdss_rd(b + 0x38), mondrian_mdss_rd(b + 0x3c),
++		    mondrian_mdss_rd(b + 0x48));
++		IOLog("MONDRIAN DPU: %s danger %#x safe %#x creq %#x qos %#x creq0 %#x creq1 %#x multirect %#x pixels %#x cdp %#x"
++		    " sw status %#x\n", ssppName[s], mondrian_mdss_rd(b + 0x60), mondrian_mdss_rd(b + 0x64), mondrian_mdss_rd(b + 0x68),
++		    mondrian_mdss_rd(b + 0x6c), mondrian_mdss_rd(b + 0x74), mondrian_mdss_rd(b + 0x78), mondrian_mdss_rd(b + 0x170),
++		    mondrian_mdss_rd(b + 0x108), mondrian_mdss_rd(b + 0x134), mondrian_mdss_rd(b + 0x70));
++		if (s < 4) {
++			IOLog("MONDRIAN DPU: %s scaler version %#x op %#x phase step %#x %#x preload %#x src %#x dst %#x\n", ssppName[s],
++			    mondrian_mdss_rd(b + 0xa00), mondrian_mdss_rd(b + 0xa04), mondrian_mdss_rd(b + 0xa10),
++			    mondrian_mdss_rd(b + 0xa14), mondrian_mdss_rd(b + 0xa20), mondrian_mdss_rd(b + 0xa40),
++			    mondrian_mdss_rd(b + 0xa48));
++		}
++	}
++	/*
++	 * The flush that changes nothing: the showing pipe's source address written again as it is, its flush bit set,
++	 * and CTL_FLUSH read until the bit is gone (the controller took it at a frame's start) or 60 ms are over; then,
++	 * only if it stayed, one CTL_START (a frame of the same picture) and 60 ms more.
++	 */
++	if (ctlAt == 0 || pipe < 0 || mondrian_te_va == 0) {
++		IOLog("MONDRIAN DPU: no flush test (CTL with INTF_1 %s, pipe at the splash address %s)\n",
++		    ctlAt != 0 ? "found" : "not found", pipe >= 0 ? ssppName[pipe] : "not found");
++		return;
++	}
++	volatile uint32_t *flush = mondrian_mdss_reg(ctlAt + 0x18), *start = mondrian_mdss_reg(ctlAt + 0x1c);
++	volatile uint32_t *addr = mondrian_mdss_reg(ssppOff[pipe] + 0x14);
++	if (flush == NULL || start == NULL || addr == NULL) {
++		return;
++	}
++	const uint32_t bit = 1u << ssppFlush[pipe];
++	for (int phase = 0; phase < 2; phase++) {
++		uint64_t t0, tEdge = 0, tClear = 0, limit = 0;
++		uint32_t level = mondrian_te_level(), edges = 0;
++
++		nanoseconds_to_absolutetime(60000000ull, &limit);
++		if (phase == 0) {
++			*addr = 0xb8000000u;
++			__asm__ volatile("dsb sy" ::: "memory");
++			*flush = bit;
++		} else {
++			*start = 1;
++		}
++		__asm__ volatile("dsb sy" ::: "memory");
++		t0 = mach_absolute_time();
++		while (mach_absolute_time() - t0 < limit) {
++			const uint32_t l = mondrian_te_level();
++
++			if (l != 0 && level == 0) {
++				edges++;
++				if (tEdge == 0) {
++					tEdge = mach_absolute_time();
++				}
++			}
++			level = l;
++			if ((*flush & bit) == 0) {
++				tClear = mach_absolute_time();
++				break;
++			}
++		}
++		IOLog("MONDRIAN DPU: flush test%s: %s bit %u on CTL at %#x: %s after %u us; first TE edge %u us after the write"
++		    " (%u edges); CTL_FLUSH now %#x\n", phase == 0 ? "" : " after CTL_START", ssppName[pipe], ssppFlush[pipe], ctlAt,
++		    tClear != 0 ? "taken" : "STILL SET", mondrian_ticks_us((tClear != 0 ? tClear : mach_absolute_time()) - t0),
++		    tEdge != 0 ? mondrian_ticks_us(tEdge - t0) : 0, edges, *flush);
++		if (tClear != 0) {
++			break;
++		}
++	}
++}
++
++/* the display controller's tear check on INTF_1 (DSI0), for the log; with to60, its line clock set for 60 Hz */
++static void
++mondrian_intf_tear(const char *when, bool to60)
++{
++	vm_offset_t intf = ml_io_map(RM_INTF1, 0x1000);
++	if (intf == 0) {
++		return;
++	}
++	volatile uint32_t *r = (volatile uint32_t *)intf;
++	const uint32_t en = r[RM_INTF_TEAR_EN / 4], vs = r[RM_INTF_TEAR_VSYNC / 4];
++	IOLog("MONDRIAN FB: INTF_1 tear check %s: enable %#x vsync cfg %#x (count %u) height %#x init %#x thresh %#x "
++	    "start %#x line %u autorefresh %#x\n", when, en, vs, vs & 0x7ffffu, r[RM_INTF_TEAR_HGT / 4],
++	    r[RM_INTF_TEAR_INIT / 4], r[RM_INTF_TEAR_THR / 4], r[RM_INTF_TEAR_START / 4], r[RM_INTF_TEAR_LINE / 4],
++	    r[RM_INTF_TEAR_AUTO / 4]);
++	if ((en & 1u) == 0) {
++		vm_offset_t pp = ml_io_map(RM_PP0, 0x1000);
++		if (pp != 0) {
++			volatile uint32_t *p = (volatile uint32_t *)pp;
++			IOLog("MONDRIAN FB: (INTF_1 tear check off) PP_0: enable %#x vsync cfg %#x height %#x line %u "
++			    "autorefresh %#x\n", p[0], p[1], p[2], p[0x2c / 4], p[0x30 / 4]);
++		}
++		return;
++	}
++	if (to60) {
++		const uint32_t count = vs & 0x7ffffu;
++		if ((vs & (1u << 19)) && count >= 80 && count <= 95) {
++			const uint32_t want = 19200000u / (2460u * 60u);        /* 130 */
++			r[RM_INTF_TEAR_VSYNC / 4] = (vs & ~0x7ffffu) | want;
++			__asm__ volatile("dsb sy" ::: "memory");
++			IOLog("MONDRIAN FB: INTF_1 tear line clock %u -> %u (60 Hz): cfg now %#x\n", count, want,
++			    r[RM_INTF_TEAR_VSYNC / 4]);
++		} else {
++			IOLog("MONDRIAN FB: INTF_1 tear line clock %u not a 90 Hz one: left alone\n", count);
++		}
++	}
++}
++
++static void
++mondrian_panel_rate(uintptr_t fbAlias)
++{
++	uint32_t hz = 90, lock = 1, offsetUs = 500;     /* v207: 90 by default (was 60) */
++	PE_parse_boot_argn("rmpanel_hz", &hz, sizeof(hz));
++	PE_parse_boot_argn("mondrianfb_telock", &lock, sizeof(lock));
++	PE_parse_boot_argn("mondrianfb_te_us", &offsetUs, sizeof(offsetUs));
++
++	mondrian_te_va = ml_io_map(RM_TE_GPIO_PA, 0x1000);
++	if (mondrian_te_va == 0) {
++		IOLog("MONDRIAN FB: TE gpio86 not mapped: panel rate left alone\n");
++		return;
++	}
++	uint64_t period = 0, width = 0, rise = 0;
++	uint32_t edges = mondrian_te_measure(200, &period, &width, &rise);
++	IOLog("MONDRIAN FB: panel TE before: %u edges in 200 ms, period %u us (%u.%02u Hz), high %u us\n", edges,
++	    mondrian_ticks_us(period), period ? (uint32_t)(100000000ull / mondrian_ticks_us(period) / 100) : 0,
++	    period ? (uint32_t)(100000000ull / mondrian_ticks_us(period) % 100) : 0, mondrian_ticks_us(width));
++	if (hz == 60 && period != 0 && mondrian_ticks_us(period) < 14000) {
++		static const uint8_t c0[] = { 0x6c, 0x02 };
++		static const uint8_t c1[] = { 0xf0, 0xaa, 0x13 };
++		static const uint8_t c2[] = { 0xd3, 0x15, 0xc2, 0x15, 0xc2, 0x15, 0x02, 0x13, 0x25, 0x0d, 0x8a, 0x00, 0x90,
++			                      0x00, 0x7d, 0x00, 0x57, 0x00, 0x0c, 0x00, 0x0c, 0x0b, 0x00, 0x7e };
++		static const uint8_t c3[] = { 0xf0, 0xaa, 0x10 };
++		static const uint8_t c4[] = { 0xb1, 0x01, 0x38, 0x00, 0x14, 0x00, 0x1c, 0x00, 0x01, 0x66, 0x00, 0x14, 0x01,
++			                      0xfc, 0x00, 0x01, 0x66, 0x00, 0x14, 0x0d, 0x6c, 0x00 };
++		static const uint8_t c5[] = { 0xf0, 0xaa, 0x00 };
++		static const struct {
++			const uint8_t *p;
++			uint32_t n;
++		} cmds[] = { { c0, sizeof(c0) }, { c1, sizeof(c1) }, { c2, sizeof(c2) }, { c3, sizeof(c3) }, { c4, sizeof(c4) },
++			     { c5, sizeof(c5) } };
++		uint32_t sent = 0;
++
++		mondrian_intf_tear("before", false);
++		for (uint32_t i = 0; i < sizeof(cmds) / sizeof(cmds[0]); i++) {
++			if (!mondrian_dsi_dcs(fbAlias, cmds[i].p, cmds[i].n)) {
++				break;
++			}
++			sent++;
++		}
++		mondrian_spin_us(20000);        /* the timing's post-wait after the last one */
++		IOLog("MONDRIAN FB: panel 60 Hz timing (live.dts timing@1): %u of 6 commands sent\n", sent);
++		if (sent == 6) {
++			mondrian_intf_tear("after the switch", true);
++		}
++		mondrian_spin_us(50000);
++		edges = mondrian_te_measure(300, &period, &width, &rise);
++		IOLog("MONDRIAN FB: panel TE after: %u edges in 300 ms, period %u us (%u.%02u Hz), high %u us\n", edges,
++		    mondrian_ticks_us(period), period ? (uint32_t)(100000000ull / mondrian_ticks_us(period) / 100) : 0,
++		    period ? (uint32_t)(100000000ull / mondrian_ticks_us(period) % 100) : 0, mondrian_ticks_us(width));
++	}
++	/*
++	 * the lock: a period near 60 Hz (15.4-18 ms) or, v207, near 90 Hz (10.4-12.2 ms); the rate everything else
++	 * uses is the measured one
++	 */
++	const uint32_t us = mondrian_ticks_us(period);
++	if (period != 0 && us >= 10400 && us <= 12200) {
++		mondrian_fb_hz = (1000000u + us / 2) / us;      /* ~90 */
++	} else if (period != 0 && us >= 15400 && us <= 18000) {
++		mondrian_fb_hz = (1000000u + us / 2) / us;      /* ~60 */
++	} else {
++		mondrian_fb_hz = hz == 90 ? 90 : 60;
++	}
++	IOLog("MONDRIAN FB: refresh rate %u Hz (panel TE period %u us)\n", mondrian_fb_hz, us);
++	/* v211: the period vsync runs at: the TE period when the lock below takes it, else the nominal one */
++	if (lock && period != 0 && ((us >= 15400 && us <= 18000) || (us >= 10400 && us <= 12200)) && width != 0) {
++		mondrian_fb_period_ns = us * 1000u;
++	} else {
++		mondrian_fb_period_ns = MONDRIAN_FB_VSYNC_US * 1000u;
++	}
++	if (lock && period != 0 && ((us >= 15400 && us <= 18000) || (us >= 10400 && us <= 12200)) && width != 0) {
++		nanoseconds_to_absolutetime((uint64_t)offsetUs * 1000ull, &mondrian_te_offset);
++		mondrian_te_width = width;
++		mondrian_te_rise = rise;
++		mondrian_te_period = period;
++		IOLog("MONDRIAN FB: vsync locked to TE: period %u us, a vsync %u us after each rising edge\n",
++		    mondrian_ticks_us(period), offsetUs);
++	} else {
++		IOLog("MONDRIAN FB: vsync not locked to TE (period %u us): the free 60 Hz timer\n", mondrian_ticks_us(period));
++	}
++}
++
++/*
++ * From the vsync timer, every 300 vsyncs: where TE's rising edge is now. The vsync came about mondrian_te_offset
++ * after one, so TE is high: wait for it to fall (at most its high time and 2 ms) and step back by the high time; if
++ * it is low, the lock slipped: wait for the next rising edge (at most a period and 2 ms). The period follows the
++ * edges seen 5 s apart. Returns the new edge's time, or 0.
++ */
++static uint64_t
++mondrian_te_resync(void)
++{
++	uint64_t edge = 0, limit = 0, now = mach_absolute_time();
++	nanoseconds_to_absolutetime(2000000ull, &limit);
++	if (mondrian_te_level()) {
++		const uint64_t end = now + mondrian_te_width + limit;
++		while ((now = mach_absolute_time()) < end) {
++			if (!mondrian_te_level()) {
++				edge = now - mondrian_te_width;
++				break;
++			}
++		}
++	} else {
++		const uint64_t end = now + mondrian_te_period + limit;
++		while ((now = mach_absolute_time()) < end) {
++			if (mondrian_te_level()) {
++				edge = now;
++				break;
++			}
++		}
++	}
++	return edge;
++}
++
++/*
++ * RedMagic v188: the touch part read on a timer of its own, twice a frame at fixed points: mondrian_touch_lead
++ * (boot-arg mondrian_touch_lead_us, default 3000) before each vsync, so the newest finger position reaches the app
++ * before its frame starts, and half a frame before that. It was woken by the vsync itself and by its thread's
++ * 10 ms tick: 120 reads a second, 6.7 and 10 ms apart, the vsync's own read landing just after the frame began.
++ * Boot-arg mondrian_touch_timer=0: woken by the vsync as before.
++ */
++extern "C" uint32_t mondrian_touch_stale_count(void);
++extern "C" int mondrian_touch_active(void);
++static uint64_t mondrian_vsync_next, mondrian_vsync_period, mondrian_touch_lead;
++static IOTimerEventSource *mondrian_touch_timer;
++static uint32_t mondrian_fb_touch_stale_rate;
++
++static void
++mondrian_touch_timer_arm(IOTimerEventSource *t)
++{
++	const uint64_t now = mach_absolute_time();
++	uint64_t margin = 0;
++	nanoseconds_to_absolutetime(1000000ull, &margin);
++	if (mondrian_vsync_period == 0 || mondrian_vsync_next == 0) {
++		uint64_t d = 0;
++		nanoseconds_to_absolutetime(4000000ull, &d);
++		t->wakeAtTime(now + d);
++		return;
++	}
++	/* v203: four reads a frame while a finger is down (every 120 Hz scan of the part), two otherwise */
++	const uint64_t half = mondrian_touch_active() ? mondrian_vsync_period / 4 : mondrian_vsync_period / 2;
++	uint64_t at = mondrian_vsync_next - mondrian_touch_lead - 2 * half;
++	while (at <= now + margin) {
++		at += half;
++	}
++	t->wakeAtTime(at);
++}
++
++static void
++mondrian_touch_timer_fired(OSObject *owner, IOTimerEventSource *sender)
++{
++	(void)owner;
++	mondrian_touch_vsync();
++	mondrian_touch_timer_arm(sender);
++}
++
 +static uint64_t mondrian_fb_wait_ticks;    /* v127: swap() time spent waiting for the GPU, since the last fps line */
 +static uint64_t mondrian_fb_flush_ticks, mondrian_fb_scale_ticks, mondrian_fb_back_ticks;   /* v129: the other steps */
 +
@@ -124215,6 +127185,27 @@ index 000000000..d212c98a9
 +	    (fCanvasWidth * 4 + 63u) & ~63u, MONDRIAN_FB_FORMAT_BGRA);
 +	fPixels = (uintptr_t)mondrian_early_fb_va();
 +	mondrian_panel_brightness(fPixels);           /* v144 */
++	mondrian_panel_rate(fPixels);                 /* v187 */
++	mondrian_dpu_dump();                          /* v198 */
++	mondrian_gpu_uc_wait_mode(150);               /* v198: fence waits sleep from here on */
++	{
++		/*
++		 * RedMagic v189: threads on the big cores only. cpu0-3 are in-order Cortex-A510s: a backboardd draw call
++		 * takes 130-470 us there against 23-34 us on cpu4-7 (ring204), and after v188 18 % of them still ran
++		 * there whenever the big cores were all busy. The little cores stop being recommended (as Apple's
++		 * performance controller does with a cluster), so the scheduler places nothing new on them; threads bound
++		 * to one (its idle thread, per-CPU work) still run, and interrupts are still taken. Boot-arg rmlittle=1
++		 * keeps all eight.
++		 */
++		uint32_t little = 0;
++		PE_parse_boot_argn("rmlittle", &little, sizeof(little));
++		if (!little) {
++			sched_perfcontrol_update_recommended_cores(0xf0u);
++			IOLog("MONDRIAN FB: cpu0-3 (Cortex-A510) not recommended: threads run on cpu4-7 (rmlittle=1 keeps all)\n");
++		} else {
++			IOLog("MONDRIAN FB: all eight cores recommended (rmlittle=1)\n");
++		}
++	}
 +	fWorkLoop = IOWorkLoop::workLoop();
 +	if (fLock == NULL || fClients == NULL || fSurface == NULL || fPixels == 0 ||
 +	    fWorkLoop == NULL) {
@@ -124229,6 +127220,24 @@ index 000000000..d212c98a9
 +		return false;
 +	}
 +	fVsync->setTimeoutUS(MONDRIAN_FB_VSYNC_US);
++	{
++		uint32_t leadUs = 3000, own = 1;
++		PE_parse_boot_argn("mondrian_touch_lead_us", &leadUs, sizeof(leadUs));
++		PE_parse_boot_argn("mondrian_touch_timer", &own, sizeof(own));
++		nanoseconds_to_absolutetime((uint64_t)leadUs * 1000ull, &mondrian_touch_lead);
++		if (own) {
++			IOTimerEventSource *t = IOTimerEventSource::timerEventSource(this,
++			    (IOTimerEventSource::Action)&mondrian_touch_timer_fired);
++			if (t != NULL && fWorkLoop->addEventSource(t) == kIOReturnSuccess) {
++				mondrian_touch_timer = t;
++				mondrian_touch_timer_arm(t);
++				IOLog("MONDRIAN FB: touch read twice a frame: %u us before each vsync and half a frame earlier\n",
++				    leadUs);
++			} else {
++				IOLog("MONDRIAN FB: no touch timer: touch woken by the vsync\n");
++			}
++		}
++	}
 +	{
 +		int fps = 0;
 +
@@ -124292,6 +127301,7 @@ index 000000000..d212c98a9
 +extern "C" int mondrian_gpu_set_level(uint32_t level);
 +extern "C" int mondrian_soc_temp_max(void);
 +extern "C" uint32_t mondrian_cpufreq_cap(uint32_t steps);
++extern "C" void mondrian_cpufreq_policy(uint32_t thermalSteps, uint32_t moving);
 +
 +/*
 + * RedMagic v121: the clock governor, half a second at a time from the vsync timer. GPU: the share of vsyncs it was
@@ -124303,16 +127313,27 @@ index 000000000..d212c98a9
 +static const uint32_t mondrian_gpu_mhz[14] = { 0, 220, 285, 324, 364, 439, 515, 580, 644, 709, 764, 815, 861, 900 };
 +
 +static void
-+mondrian_governor_tick(uint32_t busySamples, uint32_t samples)
++mondrian_governor_tick(uint32_t busySamples, uint32_t samples, uint32_t swaps)
 +{
 +	static int on = -1;
 +	static uint32_t level, minLevel = 3, maxLevel = 11, cpuSteps, logged;
++	/*
++	 * RedMagic v185: while the screen moves (more than 10 swaps since the last tick, half a second: 20+ fps) the GPU
++	 * stays at least at activeLevel (8: 644 MHz; boot-arg mondrian_gpu_active), under the thermal cap. The busy
++	 * samples (the GPU seen busy at vsync instants) read 0-33 % while scrolling ran 55 fps, and the clock sat at
++	 * 324 MHz (v184).
++	 */
++	static uint32_t activeLevel = 8, lastSwaps, activeLogged;
++	const uint32_t moving = swaps - lastSwaps;
++	lastSwaps = swaps;
 +
 +	if (on < 0) {
 +		uint32_t v = 1;
 +		on = !(PE_parse_boot_argn("mondrian_gov", &v, sizeof(v)) && v == 0);
 +		level = 9;
 +		PE_parse_boot_argn("mondrian_gpu_level", &level, sizeof(level));
++		PE_parse_boot_argn("mondrian_gpu_active", &activeLevel, sizeof(activeLevel));
++		if (activeLevel > 13) activeLevel = 13;
 +		PE_parse_boot_argn("mondrian_gpu_min", &minLevel, sizeof(minLevel));
 +		PE_parse_boot_argn("mondrian_gpu_max", &maxLevel, sizeof(maxLevel));
 +		if (maxLevel > 13) maxLevel = 13;
@@ -124355,8 +127376,15 @@ index 000000000..d212c98a9
 +	uint32_t want = level;
 +	if (pct >= 60) {
 +		want = level + 2;
-+	} else if (pct <= 25 && level > minLevel) {
++	} else if (pct <= 25 && level > minLevel && moving < 10) {
 +		want = level - 1;
++	}
++	if (moving >= 10 && want < activeLevel) {
++		want = activeLevel;     /* v185: the screen is moving */
++		if (activeLogged++ < 20) {
++			printf("MONDRIAN GOV: screen moving (%u swaps in half a second): GPU floor %u MHz (cap %u MHz)\n",
++			    moving, mondrian_gpu_mhz[activeLevel], mondrian_gpu_mhz[cap]);
++		}
 +	}
 +	if (want > cap) want = cap;
 +	if (want < minLevel && cap >= minLevel) want = minLevel;
@@ -124368,16 +127396,21 @@ index 000000000..d212c98a9
 +		level = want;
 +	}
 +	uint32_t steps = cpuSteps;
-+	if (temp >= 850 && steps < 12) {
++	/*
++	 * RedMagic v197: the CPU cap from 80 C (was 85). ring213 sat at 74-84 C for 14 minutes with every core at its
++	 * top row (a daemon crash loop after the v196 launchd edit) and never reached 85, so nothing slowed down: three
++	 * rows lower each half second from 80 C, up to 12; three rows back each half second under 72 C.
++	 */
++	if (temp >= 800 && steps < 12) {
 +		steps += 3;
 +	} else if (temp < 720 && steps > 0) {
 +		steps -= 3;
 +	}
 +	if (steps != cpuSteps) {
-+		uint32_t mhz = mondrian_cpufreq_cap(steps);
 +		cpuSteps = steps;
-+		printf("MONDRIAN GOV: CPU %u rows below top, biggest cluster %u MHz (%d.%d C)\n", steps, mhz, temp / 10, temp % 10);
++		printf("MONDRIAN GOV: CPU thermal cap %u rows below top (%d.%d C)\n", steps, temp / 10, temp % 10);
 +	}
++	mondrian_cpufreq_policy(steps, moving);     /* v199: the clocks follow the screen; the thermal rows still apply */
 +}
 +extern "C" uint64_t mondrian_fb_vsync_refcon;
 +extern "C" void flush_dcache64(addr64_t addr, unsigned count, int phys);
@@ -124390,6 +127423,7 @@ index 000000000..d212c98a9
 +	uint64_t count = ++fb->fVsyncCount;
 +
 +	fb->fLastVsync = now;
++	mondrian_gpu_uc_wait_kick();            /* v198: a fence waiter whose own deadline did not fire wakes here */
 +	/*
 +	 * RedMagic v100: the vsync's time in CONTINUOUS time, as Apple's display driver sends it. IOMobileFramebuffer's
 +	 * kern_egest_timestamp turns it into absolute time as stamp - mach_continuous_time() + mach_absolute_time(),
@@ -124439,13 +127473,64 @@ index 000000000..d212c98a9
 +	 * 60 and its clients pace their frames by it. A deadline already past (a long stall) starts again from now.
 +	 */
 +	{
-+		static uint64_t deadline, period;
++		static uint64_t deadline, period, lastEdge;
++		static uint32_t resyncs;
++		bool fresh = false;
 +		if (period == 0) {
-+			nanoseconds_to_absolutetime((uint64_t)MONDRIAN_FB_VSYNC_US * 1000ull, &period);
++			if (mondrian_te_period != 0) {
++				period = mondrian_te_period;    /* v187: the panel's own */
++				lastEdge = mondrian_te_rise;
++			} else {
++				nanoseconds_to_absolutetime((uint64_t)MONDRIAN_FB_VSYNC_US * 1000ull, &period);
++			}
++		}
++		if (mondrian_te_period != 0 && (deadline == 0 || (count % 300) == 0)) {
++			/* v187: back on TE's phase, and its period from the edges since the last look */
++			const uint64_t edge = deadline == 0 ? mondrian_te_rise : mondrian_te_resync();
++			if (edge != 0) {
++				if (edge > lastEdge && lastEdge != 0 && deadline != 0) {
++					const uint64_t n = (edge - lastEdge + period / 2) / period;
++					if (n >= 30) {
++						const uint64_t measured = (edge - lastEdge) / n;
++						if (measured > period - period / 50 && measured < period + period / 50) {
++							period = (period * 3 + measured) / 4;
++						}
++					}
++				}
++				/* how far this vsync's deadline was from edge + offset, folded into half a period either way */
++				int64_t error = 0;
++				if (deadline != 0) {
++					const int64_t p = (int64_t)period;
++					error = ((int64_t)deadline - (int64_t)(edge + mondrian_te_offset)) % p;
++					if (error >= p / 2) {
++						error -= p;
++					} else if (error < -p / 2) {
++						error += p;
++					}
++				}
++				if (resyncs++ < 12 || (resyncs % 24) == 0) {
++					printf("MONDRIAN FB: TE resync %u: period %u us, vsync was %s%u us off its edge + offset\n",
++					    resyncs, mondrian_ticks_us(period), error < 0 ? "-" : "",
++					    mondrian_ticks_us((uint64_t)(error < 0 ? -error : error)));
++				}
++				lastEdge = edge;
++				deadline = edge + mondrian_te_offset;
++				fresh = true;
++			}
 +		}
 +		const uint64_t t = mach_absolute_time();
-+		deadline = (deadline == 0 || deadline + period <= t) ? t + period : deadline + period;
++		if (deadline == 0) {
++			deadline = t + period;
++		} else if (fresh && deadline > t) {
++			/* v187: the lock slipped and the next edge is still ahead: its vsync, nothing skipped */
++		} else if (deadline + period <= t) {
++			deadline += ((t - deadline) / period + 1) * period;     /* v187: a stall skips whole periods, phase kept */
++		} else {
++			deadline += period;
++		}
 +		sender->wakeAtTime(deadline);
++		mondrian_vsync_next = deadline;         /* v188: the touch timer's anchor */
++		mondrian_vsync_period = period;
 +	}
 +	/*
 +	 * RedMagic v78: the vsync rate as it really is. Every 300 vsyncs (5 s at 60 Hz), the time they took and the
@@ -124518,7 +127603,7 @@ index 000000000..d212c98a9
 +		busy += mondrian_gpu_uc_busy() ? 1 : 0;
 +		samples++;
 +		if (samples >= 30) {
-+			mondrian_governor_tick(busy, samples);
++			mondrian_governor_tick(busy, samples, fb->fSwapCount);
 +			busy = samples = 0;
 +		}
 +	}
@@ -124570,12 +127655,18 @@ index 000000000..d212c98a9
 +	{
 +		static uint32_t touched_last;
 +
-+		mondrian_touch_vsync();
++		static uint32_t stale_last;
++
++		if (mondrian_touch_timer == NULL) {
++			mondrian_touch_vsync();
++		}
 +		if ((count % MONDRIAN_FB_REFRESH_HZ) == 0) {
-+			uint32_t now_reports = mondrian_touch_report_count();
++			uint32_t now_reports = mondrian_touch_report_count(), now_stale = mondrian_touch_stale_count();
 +
 +			fb->fTouchRate = now_reports - touched_last;
 +			touched_last = now_reports;
++			mondrian_fb_touch_stale_rate = now_stale - stale_last;
++			stale_last = now_stale;
 +		}
 +	}
 +	/*
@@ -124613,10 +127704,14 @@ index 000000000..d212c98a9
 +			scale_avg /= n;
 +			back_avg /= n;
 +		}
++		/* v198: and how busy each processor was in that second, in percent (cpu0-3 little, cpu4-7 big) */
++		uint8_t busy[8];
++		mondrian_cpu_busy_percent(busy);
 +		IOLog("MONDRIAN FB: fps %u copy avg %llu us (GPU wait %llu, flush %llu, scale %llu, copy-back %llu) max %llu us "
-+		    "late avg %llu us max %llu us touch %u/s\n",
++		    "late avg %llu us max %llu us touch %u/s (%u stale) cpu busy %u %u %u %u | %u %u %u %u %%\n",
 +		    n, copy_avg / 1000, wait_avg / 1000, flush_avg / 1000, scale_avg / 1000, back_avg / 1000, copy_max / 1000,
-+		    late_avg / 1000, late_max / 1000, fb->fTouchRate);
++		    late_avg / 1000, late_max / 1000, fb->fTouchRate, mondrian_fb_touch_stale_rate,
++		    busy[0], busy[1], busy[2], busy[3], busy[4], busy[5], busy[6], busy[7]);
 +		fb->fFpsLast = swaps;
 +		fb->fCopyTicks = fb->fCopyMaxTicks = 0;
 +		fb->fLateTicks = fb->fLateMaxTicks = 0;
@@ -125266,10 +128361,10 @@ index 000000000..d212c98a9
 +#endif /* MONDRIAN */
 diff --git a/iokit/Kernel/arm/MondrianGPU.cpp b/iokit/Kernel/arm/MondrianGPU.cpp
 new file mode 100644
-index 000000000..949b11995
+index 000000000..7c51f5214
 --- /dev/null
 +++ b/iokit/Kernel/arm/MondrianGPU.cpp
-@@ -0,0 +1,1725 @@
+@@ -0,0 +1,2056 @@
 +/*
 + * MondrianGPU: the GPU's IOKit driver for mondrian (Adreno 730, SM8475).
 + * See MondrianGPU.h for the shape of the interface.
@@ -125293,8 +128388,29 @@ index 000000000..949b11995
 +int mondrian_gpu_uc_recover(void);
 +void flush_dcache64(addr64_t addr, unsigned count, int phys);
 +void mondrian_gpu_uc_iova_free(uint64_t iova, uint64_t bytes);
++void mondrian_gpu_uc_iova_stats(uint64_t *bump, uint32_t *ranges, uint64_t *freeBytes, uint32_t *tables,
++    uint32_t *tablesMax);
++void mondrian_gpu_uc_wait_stats(uint64_t out[4]);
++int mondrian_gpu_uc_fence_passed(uint32_t fence);
 +}
 +static uint64_t mondrian_submit_ticks, mondrian_submit_count;   /* v126 */
++/* v198: buffers made (and the time that took), closed, and closed with the GPU still on them (freed later), for the
++ * two-second line; under the driver's one lock */
++static uint64_t mondrian_bo_made, mondrian_bo_made_ticks, mondrian_bo_closed, mondrian_bo_deferred;
++/* v198: the per-buffer log lines (one for every buffer made and freed: hundreds a second while something moves) only
++ * for the first 200, or all with rmgpudump=1 */
++static bool
++mondrian_bo_log(void)
++{
++	static int all = -1;
++	static uint32_t lines;
++
++	if (all < 0) {
++		all = 0;
++		PE_parse_boot_argn("rmgpudump", &all, sizeof(all));
++	}
++	return all != 0 || lines++ < 200;
++}
 +
 +/*
 + * RedMagic v131: the last submission that used each buffer's memory (read or written), by the memory descriptor --
@@ -125457,7 +128573,12 @@ index 000000000..949b11995
 +#define MSM_PREP_NOSYNC		0x04
 +
 +#define kMondrianBufferMax	(256u << 20)
-+#define kMondrianBuffers	1024
++/*
++ * RedMagic v190: 4096 live buffers a client (was 1024). ring205: backboardd's gem_new refused ~3700 times after a
++ * longer session with apps opened, its draws refused ("no memory for the draw's table"), and it aborted (exit 0x6,
++ * the crash) and its successor hit the same wall. Which limit it was is now in the refusal line.
++ */
++#define kMondrianBuffers	4096
 +#define kMondrianSubmits	64
 +/*
 + * RedMagic v117: the buffers one submission may name. 64 (the command limit, and a stack array) refused CoreAnimation's
@@ -125477,7 +128598,18 @@ index 000000000..949b11995
 +	uint64_t size;
 +	uint64_t iova;
 +	IOMemoryDescriptor *memory;
++	uint32_t freeFence;             /* v198: closed, and freed once the CP has passed this fence */
++	bool surface;                   /* v198: an IOSurface's memory (the framebuffer asks for its last fence) */
++	mondrian_buffer *next;          /* v198: the closed buffers, oldest first */
++	mondrian_buffer *hashNext;      /* v198: the handle table's chain */
 +};
++
++/* v198: the handle table (a client holds a thousand buffers and more; every submission looked each of its hundred
++ * up by walking them all) */
++#define kMondrianHashBuckets	1024u
++/* v198: closed buffers the GPU may still read: past these, a close waits for the oldest as every close did before */
++#define kMondrianRetiredMax	1024u
++#define kMondrianRetiredBytes	(192ull << 20)
 +
 +class MondrianGPU;
 +
@@ -125489,6 +128621,7 @@ index 000000000..949b11995
 +	virtual bool initWithTask(task_t owningTask, void *securityToken,
 +	    UInt32 type, OSDictionary *properties) APPLE_KEXT_OVERRIDE;
 +	virtual IOReturn clientClose(void) APPLE_KEXT_OVERRIDE;
++	virtual void free(void) APPLE_KEXT_OVERRIDE;
 +	virtual IOReturn clientMemoryForType(UInt32 type, IOOptionBits *options,
 +	    IOMemoryDescriptor **memory) APPLE_KEXT_OVERRIDE;
 +	virtual IOReturn externalMethod(uint32_t selector,
@@ -125509,13 +128642,19 @@ index 000000000..949b11995
 +	mondrian_buffer *bufferAdopt(IOMemoryDescriptor *memory, uint64_t size);
 +	void bufferFree(mondrian_buffer *buffer);
 +	void bufferSync(mondrian_buffer *buffer);
++	void bufferUnlist(mondrian_buffer *buffer);
++	void bufferUnmap(mondrian_buffer *buffer);
++	void bufferRelease(mondrian_buffer *buffer);
++	void bufferRetire(mondrian_buffer *buffer);
++	uint32_t reapRetired(void);
 +	void freeAll(void);
 +
 +	IOLock *fLock;
 +	mondrian_buffer *fScratch;
 +	uint32_t fExpanded;
-+	mondrian_buffer *fBuffers[kMondrianBuffers];
++	mondrian_buffer **fBuffers;     /* v190: kMondrianBuffers entries, allocated apart (the object must stay <= 16 KB) */
 +	uint32_t fBufferCount;
++	uint32_t fLastFail;     /* v190: why the last bufferNew/bufferAdopt failed (1 count, 2 memory, 3 iova, 4 map, 5 malloc) */
 +	uint32_t fNextHandle;
 +	uint32_t fNextQueue;
 +	uint32_t fLastFence;
@@ -125524,7 +128663,14 @@ index 000000000..949b11995
 +	uint32_t fNested;
 +	uint32_t fStateGroup;
 +	uint32_t fPrepLogged;
++	mondrian_buffer **fHash;        /* v198: kMondrianHashBuckets chains by handle */
 +};
++
++/* v198: the buffers closed and not yet freed, of every client, oldest first (fences are one sequence for all), under
++ * the driver's one lock: whoever calls next frees what the GPU is past, whoever's it was */
++static mondrian_buffer *gRetiredHead, *gRetiredTail;
++static uint32_t gRetiredCount;
++static uint64_t gRetiredBytes;
 +
 +class MondrianGPU : public IOService
 +{
@@ -125634,6 +128780,7 @@ index 000000000..949b11995
 +	fScratch = NULL;
 +	fExpanded = 0;
 +	fBufferCount = 0;
++	fLastFail = 0;
 +	fNextHandle = 1;
 +	fNextQueue = 0;
 +	fLastFence = 0;
@@ -125645,7 +128792,14 @@ index 000000000..949b11995
 +	if (fLock == NULL) {
 +		return false;
 +	}
-+	bzero(fBuffers, sizeof(fBuffers));
++	fBuffers = (mondrian_buffer **)IOMallocZero(kMondrianBuffers * sizeof(*fBuffers));
++	if (fBuffers == NULL) {
++		return false;
++	}
++	fHash = (mondrian_buffer **)IOMallocZero(kMondrianHashBuckets * sizeof(*fHash));
++	if (fHash == NULL) {
++		return false;
++	}
 +	/*
 +	 * RedMagic v46: no IOUserClient default locking. Without these keys
 +	 * IOKit takes the client's lock shared around every externalMethod and
@@ -125661,22 +128815,55 @@ index 000000000..949b11995
 +	return true;
 +}
 +
++/*
++ * RedMagic v198: every buffer of the client goes, in one pass: unmapped, the page tables synchronised once, then
++ * released. The loop this replaces freed fBuffers[i] for rising i while each free moved the last buffer into the
++ * slot just emptied, so it freed every other buffer and dropped the rest with fBufferCount = 0: half of a process's
++ * GPU buffers -- wired memory below 4 GB, their GPU addresses and page-table entries -- stayed for good each time a
++ * process that drew exited. (And a page-table flush and TLB invalidate per buffer, under the one lock every client
++ * shares, for the half it did free.)
++ */
 +void
 +MondrianGPUUserClient::freeAll(void)
 +{
++	mondrian_buffer *gone = NULL, *b;
 +	uint32_t i;
 +
 +	for (i = 0; i < fBufferCount; i++) {
-+		bufferFree(fBuffers[i]);
++		b = fBuffers[i];
++		fBuffers[i] = NULL;
++		if (b == NULL) {
++			continue;
++		}
++		bufferUnmap(b);
++		b->next = gone;
++		gone = b;
 +	}
 +	fBufferCount = 0;
++	if (fHash != NULL) {
++		bzero(fHash, kMondrianHashBuckets * sizeof(*fHash));
++	}
++	if (gone != NULL) {
++		(void)mondrian_gpu_uc_tables_sync();
++		while ((b = gone) != NULL) {
++			gone = b->next;
++			bufferRelease(b);
++		}
++	}
++	(void)reapRetired();
 +	fScratch = NULL;
 +}
 +
 +IOReturn
 +MondrianGPUUserClient::clientClose(void)
 +{
-+	if (fLock != NULL) {
++	if (fLock != NULL && fBuffers != NULL) {
++		/* v198: what the GPU was given is let finish first (it may be reading these buffers), outside the lock */
++		uint32_t last = mondrian_gpu_uc_last_fence();
++
++		if (last != 0 && !mondrian_gpu_uc_fence_passed(last)) {
++			(void)mondrian_gpu_uc_wait(last, 500);
++		}
 +		IOLockLock(fLock);
 +		freeAll();
 +		IOLockUnlock(fLock);
@@ -125684,14 +128871,31 @@ index 000000000..949b11995
 +	return kIOReturnSuccess;
 +}
 +
++void
++MondrianGPUUserClient::free(void)
++{
++	if (fBuffers != NULL) {
++		IOFree(fBuffers, kMondrianBuffers * sizeof(*fBuffers));
++		fBuffers = NULL;
++	}
++	if (fHash != NULL) {
++		IOFree(fHash, kMondrianHashBuckets * sizeof(*fHash));
++		fHash = NULL;
++	}
++	super::free();
++}
++
 +mondrian_buffer *
 +MondrianGPUUserClient::bufferForType(uint32_t type)
 +{
-+	uint32_t i;
++	mondrian_buffer *b;
 +
-+	for (i = 0; i < fBufferCount; i++) {
-+		if (fBuffers[i] != NULL && fBuffers[i]->handle == type) {
-+			return fBuffers[i];
++	if (fHash == NULL) {
++		return NULL;
++	}
++	for (b = fHash[type & (kMondrianHashBuckets - 1)]; b != NULL; b = b->hashNext) {
++		if (b->handle == type) {
++			return b;
 +		}
 +	}
 +	return NULL;
@@ -125709,14 +128913,23 @@ index 000000000..949b11995
 + * RedMagic v125: physically contiguous pages are flushed as one range and the barrier comes once, at the end (it was a
 + * flush and a DSB per 4 KB page; a home-screen command buffer touches tens of MB). Same lines flushed as before.
 + */
++static void mondrian_memory_sync(IOMemoryDescriptor *memory, uint64_t size);
++
 +void
 +MondrianGPUUserClient::bufferSync(mondrian_buffer *buffer)
 +{
++	mondrian_memory_sync(buffer->memory, buffer->size);
++}
++
++/* v198: by the memory, so a submission can do it with the buffers' memory retained and the lock dropped */
++static void
++mondrian_memory_sync(IOMemoryDescriptor *memory, uint64_t size)
++{
 +	uint64_t off, runPa = 0, runLen = 0;
 +
-+	for (off = 0; off < buffer->size; off += 0x1000) {
++	for (off = 0; off < size; off += 0x1000) {
 +		IOByteCount length = 0;
-+		addr64_t pa = buffer->memory->getPhysicalSegment(off, &length);
++		addr64_t pa = memory->getPhysicalSegment(off, &length);
 +
 +		if (pa == 0 || length == 0) {
 +			continue;
@@ -125750,10 +128963,12 @@ index 000000000..949b11995
 +	size = (size + 0xfffu) & ~0xfffull;
 +	if (memory == NULL || size == 0 || size > kMondrianBufferMax ||
 +	    fBufferCount >= kMondrianBuffers) {
++		fLastFail = memory == NULL ? 2 : 1;
 +		return NULL;
 +	}
 +	iova = mondrian_gpu_uc_iova_alloc(size);
 +	if (iova == 0) {
++		fLastFail = 3;
 +		return NULL;
 +	}
 +	for (off = 0; off < size; off += 0x1000) {
@@ -125764,6 +128979,8 @@ index 000000000..949b11995
 +			for (i = 0; i < off; i += 0x1000) {
 +				(void)mondrian_gpu_uc_unmap_page(iova + i);
 +			}
++			mondrian_gpu_uc_iova_free(iova, size);  /* v190: the range back (it was lost) */
++			fLastFail = 4;
 +			return NULL;
 +		}
 +		if (mondrian_gpu_uc_map_page(iova + off, pa,
@@ -125771,12 +128988,15 @@ index 000000000..949b11995
 +			for (i = 0; i <= off; i += 0x1000) {
 +				(void)mondrian_gpu_uc_unmap_page(iova + i);
 +			}
++			mondrian_gpu_uc_iova_free(iova, size);  /* v190 */
++			fLastFail = 4;
 +			return NULL;
 +		}
 +	}
 +	(void)mondrian_gpu_uc_tables_sync();
 +	buffer = (mondrian_buffer *)IOMalloc(sizeof(mondrian_buffer));
 +	if (buffer == NULL) {
++		fLastFail = 5;
 +		return NULL;
 +	}
 +	memory->retain();
@@ -125784,8 +129004,16 @@ index 000000000..949b11995
 +	buffer->size = size;
 +	buffer->iova = iova;
 +	buffer->memory = memory;
++	buffer->freeFence = 0;
++	buffer->surface = false;
++	buffer->next = NULL;
++	buffer->hashNext = fHash[buffer->handle & (kMondrianHashBuckets - 1)];
++	fHash[buffer->handle & (kMondrianHashBuckets - 1)] = buffer;
 +	fBuffers[fBufferCount++] = buffer;
-+	printf("MondrianGPU: bo %u at 0x%llx size 0x%llx\n", buffer->handle, iova, size);
++	mondrian_bo_made++;
++	if (mondrian_bo_log()) {
++		printf("MondrianGPU: bo %u at 0x%llx size 0x%llx\n", buffer->handle, iova, size);
++	}
 +	return buffer;
 +}
 +
@@ -125797,6 +129025,7 @@ index 000000000..949b11995
 +
 +	if (size == 0 || size > kMondrianBufferMax || fBufferCount >=
 +	    kMondrianBuffers) {
++		fLastFail = 1;
 +		return NULL;
 +	}
 +	/*
@@ -125822,6 +129051,7 @@ index 000000000..949b11995
 +	    kIODirectionInOut, (size + 0xfffu) & ~0xfffull,
 +	    anyphys ? 0x0000fffffffff000ull : 0x00000000fffff000ull);
 +	if (memory == NULL) {
++		fLastFail = 2;
 +		return NULL;
 +	}
 +	uint64_t t1 = mach_absolute_time();
@@ -125837,24 +129067,17 @@ index 000000000..949b11995
 +	return buffer;
 +}
 +
++/*
++ * RedMagic v198: a buffer's end in its steps, so that many can share one page-table synchronisation -- out of the
++ * client's tables (bufferUnlist), its pages out of the GPU's address space (bufferUnmap; the caller synchronises the
++ * tables after the last), and its range, memory and record given back (bufferRelease, after that synchronisation).
++ */
 +void
-+MondrianGPUUserClient::bufferFree(mondrian_buffer *buffer)
++MondrianGPUUserClient::bufferUnlist(mondrian_buffer *buffer)
 +{
-+	uint64_t off;
++	mondrian_buffer **link;
 +	uint32_t i;
 +
-+	if (buffer == NULL) {
-+		return;
-+	}
-+	printf("MondrianGPU: bo %u freed (0x%llx size 0x%llx)\n", buffer->handle, buffer->iova, buffer->size);
-+	for (off = 0; off < buffer->size; off += 0x1000) {
-+		(void)mondrian_gpu_uc_unmap_page(buffer->iova + off);
-+	}
-+	(void)mondrian_gpu_uc_tables_sync();
-+	mondrian_gpu_uc_iova_free(buffer->iova, buffer->size);   /* v139: the range can be used again */
-+	if (buffer->memory != NULL) {
-+		buffer->memory->release();
-+	}
 +	for (i = 0; i < fBufferCount; i++) {
 +		if (fBuffers[i] == buffer) {
 +			fBuffers[i] = fBuffers[--fBufferCount];
@@ -125862,7 +129085,115 @@ index 000000000..949b11995
 +			break;
 +		}
 +	}
++	for (link = &fHash[buffer->handle & (kMondrianHashBuckets - 1)]; *link != NULL; link = &(*link)->hashNext) {
++		if (*link == buffer) {
++			*link = buffer->hashNext;
++			break;
++		}
++	}
++	buffer->hashNext = NULL;
++	if (fScratch == buffer) {
++		fScratch = NULL;
++	}
++}
++
++void
++MondrianGPUUserClient::bufferUnmap(mondrian_buffer *buffer)
++{
++	uint64_t off;
++
++	if (mondrian_bo_log()) {
++		printf("MondrianGPU: bo %u freed (0x%llx size 0x%llx)\n", buffer->handle, buffer->iova, buffer->size);
++	}
++	for (off = 0; off < buffer->size; off += 0x1000) {
++		(void)mondrian_gpu_uc_unmap_page(buffer->iova + off);
++	}
++}
++
++void
++MondrianGPUUserClient::bufferRelease(mondrian_buffer *buffer)
++{
++	mondrian_gpu_uc_iova_free(buffer->iova, buffer->size);   /* v139: the range can be used again */
++	if (buffer->memory != NULL) {
++		buffer->memory->release();
++	}
 +	IOFree(buffer, sizeof(mondrian_buffer));
++}
++
++void
++MondrianGPUUserClient::bufferFree(mondrian_buffer *buffer)
++{
++	if (buffer == NULL) {
++		return;
++	}
++	bufferUnlist(buffer);
++	bufferUnmap(buffer);
++	(void)mondrian_gpu_uc_tables_sync();
++	bufferRelease(buffer);
++}
++
++/*
++ * RedMagic v198: a closed buffer the GPU may still be reading is freed later, not waited for. Every close waited
++ * (v47) for everything submitted so far -- a frame's worth of GPU time, spinning, on whichever thread let the buffer
++ * go: the window server frees a hundred and more a second while something moves, from its drawing thread and from
++ * the plug-in's completion thread, whose completions then came 20-150 ms after the GPU was done (ring205-214). The
++ * buffer leaves the client's tables at once (its handle is gone, as the caller expects), keeps its memory and its
++ * GPU addresses until the CP has passed the newest fence handed out when it was closed, and is freed by whichever
++ * call of the client comes next after that (reapRetired: a new buffer, a close, a submission) or at the client's
++ * end. Fences come in order, so the list is oldest first and the reaping stops at the first not yet passed.
++ */
++void
++MondrianGPUUserClient::bufferRetire(mondrian_buffer *buffer)
++{
++	const uint32_t fence = mondrian_gpu_uc_last_fence();
++
++	bufferUnlist(buffer);
++	mondrian_bo_closed++;
++	if (mondrian_gpu_uc_fence_passed(fence)) {
++		bufferUnmap(buffer);
++		(void)mondrian_gpu_uc_tables_sync();
++		bufferRelease(buffer);
++		return;
++	}
++	mondrian_bo_deferred++;
++	buffer->freeFence = fence;
++	buffer->next = NULL;
++	if (gRetiredTail != NULL) {
++		gRetiredTail->next = buffer;
++	} else {
++		gRetiredHead = buffer;
++	}
++	gRetiredTail = buffer;
++	gRetiredCount++;
++	gRetiredBytes += buffer->size;
++}
++
++uint32_t
++MondrianGPUUserClient::reapRetired(void)
++{
++	mondrian_buffer *ready = NULL, *b;
++	uint32_t n = 0;
++
++	while ((b = gRetiredHead) != NULL && mondrian_gpu_uc_fence_passed(b->freeFence)) {
++		gRetiredHead = b->next;
++		if (gRetiredHead == NULL) {
++			gRetiredTail = NULL;
++		}
++		gRetiredCount--;
++		gRetiredBytes -= b->size;
++		bufferUnmap(b);
++		b->next = ready;
++		ready = b;
++		n++;
++	}
++	if (ready != NULL) {
++		(void)mondrian_gpu_uc_tables_sync();   /* once for all of them, before any range is given out again */
++		while ((b = ready) != NULL) {
++			ready = b->next;
++			bufferRelease(b);
++		}
++	}
++	return n;
 +}
 +
 +IOReturn
@@ -125871,11 +129202,40 @@ index 000000000..949b11995
 +	mondrian_buffer *buffer;
 +
 +	IOLockLock(fLock);
-+	buffer = bufferNew(request->size);
-+	if (buffer == NULL) {
++	(void)reapRetired();       /* v198: what was closed and is done with comes back first */
++	{
++		const uint64_t t0 = mach_absolute_time();
++
++		buffer = bufferNew(request->size);
++		mondrian_bo_made_ticks += mach_absolute_time() - t0;
++	}
++	if (buffer == NULL && gRetiredCount != 0) {
++		/* v198: refused with closed buffers still held for the GPU: let it finish them, free them, ask again */
++		const uint32_t last = gRetiredTail->freeFence;
++
 +		IOLockUnlock(fLock);
-+		IOLog("MondrianGPU: gem_new 0x%llx refused\n",
-+		    (unsigned long long)request->size);
++		(void)mondrian_gpu_uc_wait(last, 500);
++		IOLockLock(fLock);
++		(void)reapRetired();
++		buffer = bufferNew(request->size);
++	}
++	if (buffer == NULL) {
++		/* v190: why, with the numbers behind it; the first 20 and every 200th after */
++		static uint32_t refusals;
++		const uint32_t count = fBufferCount, why = fLastFail;
++		IOLockUnlock(fLock);
++		if (refusals++ < 20 || (refusals % 200) == 0) {
++			static const char *const whyText[] = { "?", "the client's buffer count or size limit",
++				"no memory below 4 GB", "no GPU address range", "a page not mapped (page tables full?)",
++				"IOMalloc" };
++			uint64_t bump = 0, freeBytes = 0;
++			uint32_t ranges = 0, tables = 0, tablesMax = 0;
++			mondrian_gpu_uc_iova_stats(&bump, &ranges, &freeBytes, &tables, &tablesMax);
++			IOLog("MondrianGPU: gem_new 0x%llx refused (%u so far): %s; %u buffers held (limit %u), GPU addresses "
++			    "used to 0x%llx with %u free ranges (%llu KB), page tables %u of %u\n",
++			    (unsigned long long)request->size, refusals, whyText[why < 6 ? why : 0], count, kMondrianBuffers,
++			    (unsigned long long)bump, ranges, (unsigned long long)(freeBytes >> 10), tables, tablesMax);
++		}
 +		return kIOReturnNoMemory;
 +	}
 +	request->handle = buffer->handle;
@@ -125942,13 +129302,17 @@ index 000000000..949b11995
 +		return kIOReturnSuccess;
 +	}
 +	IOLockLock(fLock);
++	(void)reapRetired();       /* v198 */
 +	buffer = bufferAdopt(surface->memory, surface->allocSize);
++	if (buffer != NULL) {
++		buffer->surface = true;         /* v198: the framebuffer asks for the last fence of surfaces only */
++		request->handle = buffer->handle;
++	}
 +	IOLockUnlock(fLock);
 +	surface->release();
 +	if (buffer == NULL) {
 +		return kIOReturnNoMemory;
 +	}
-+	request->handle = buffer->handle;
 +	return kIOReturnSuccess;
 +}
 +
@@ -126105,6 +129469,35 @@ index 000000000..949b11995
 +	 * boot-arg gnosync=1 skips it (a measurement: what the frame rate would be without it; stale data
 +	 * on screen is expected).
 +	 */
++	/*
++	 * RedMagic v198: the buffers are looked up once, under the lock, and their memory retained for the rest of the
++	 * submission. They were looked up and their memory flushed with the lock dropped, while another thread of the
++	 * client could close one (the plug-in's completion thread frees buffers as the drawing thread submits): a
++	 * flush of memory just released.
++	 */
++	struct mondrian_submit_ref {
++		IOMemoryDescriptor *memory;
++		uint64_t size;
++		bool surface;
++	};
++	const vm_size_t refsSize = (vm_size_t)request->nr_bos * sizeof(struct mondrian_submit_ref);
++	struct mondrian_submit_ref *refs = (struct mondrian_submit_ref *)IOMalloc(refsSize);
++	if (refs == NULL) {
++		return kIOReturnNoMemory;
++	}
++	IOLockLock(fLock);
++	for (i = 0; i < request->nr_bos; i++) {
++		mondrian_buffer *bo = bufferForType(bos[i].handle);
++
++		refs[i].memory = bo != NULL ? bo->memory : NULL;
++		refs[i].size = bo != NULL ? bo->size : 0;
++		refs[i].surface = bo != NULL && bo->surface;
++		if (refs[i].memory != NULL) {
++			refs[i].memory->retain();
++		}
++	}
++	(void)reapRetired();
++	IOLockUnlock(fLock);
 +	{
 +		static int nosync = -1, synclog = -1;
 +		static uint64_t periodStart, syncNs, submitBytes, submits, maxNs, lines;
@@ -126117,12 +129510,10 @@ index 000000000..949b11995
 +			synclog = (PE_parse_boot_argn("mondrian_gpu_synclog", &v, sizeof(v)) && v == 0) ? 0 : 1;
 +		}
 +		for (i = 0; i < request->nr_bos; i++) {
-+			mondrian_buffer *bo = bufferForType(bos[i].handle);
-+
-+			if (bo != NULL) {
-+				bytes += bo->size;
++			if (refs[i].memory != NULL) {
++				bytes += refs[i].size;
 +				if (!nosync) {
-+					bufferSync(bo);
++					mondrian_memory_sync(refs[i].memory, refs[i].size);
 +				}
 +			}
 +		}
@@ -126139,8 +129530,8 @@ index 000000000..949b11995
 +			uint64_t period = 0;
 +			absolutetime_to_nanoseconds(t0 - periodStart, &period);
 +			if (period >= 2000000000ull) {
-+				if (synclog && lines++ < 300) {
-+					uint64_t submitNs = 0;
++				if (synclog && lines++ < 600) {
++					uint64_t submitNs = 0, madeNs = 0, ws[4] = { 0, 0, 0, 0 };
 +					absolutetime_to_nanoseconds(mondrian_submit_ticks, &submitNs);
 +					IOLog("MondrianGPU: sync%s %llu submits, %llu MB touched (%llu KB each), %llu ms in all, %llu us each, "
 +					    "%llu us at most; whole submit %llu us each\n", nosync ? " OFF" : "", submits, submitBytes >> 20,
@@ -126148,6 +129539,15 @@ index 000000000..949b11995
 +					    mondrian_submit_count ? submitNs / mondrian_submit_count / 1000 : 0);
 +					mondrian_submit_ticks = 0;
 +					mondrian_submit_count = 0;
++					/* v198: the fence waits of every waiter, and the buffers made and closed, since the last line */
++					mondrian_gpu_uc_wait_stats(ws);
++					absolutetime_to_nanoseconds(mondrian_bo_made_ticks, &madeNs);
++					IOLog("MondrianGPU: waits %llu, %llu us each, %llu sleeps (%llu ended by the vsync); buffers %llu made "
++					    "(%llu us each), %llu closed, %llu of them freed later; this client holds %u, %u closed not yet "
++					    "freed (%llu KB)\n", ws[0], ws[0] ? ws[1] / ws[0] : 0, ws[2], ws[3], mondrian_bo_made,
++					    mondrian_bo_made ? madeNs / mondrian_bo_made / 1000 : 0, mondrian_bo_closed, mondrian_bo_deferred,
++					    fBufferCount, gRetiredCount, gRetiredBytes >> 10);
++					mondrian_bo_made = mondrian_bo_made_ticks = mondrian_bo_closed = mondrian_bo_deferred = 0;
 +				}
 +				periodStart = t0;
 +				syncNs = submitBytes = submits = maxNs = 0;
@@ -126177,7 +129577,13 @@ index 000000000..949b11995
 +		 * CP_INDIRECT_BUFFER; that target is where a real driver's
 +		 * packets live, so dump it too, once.
 +		 */
-+		if (fNested < 4 && cmds[i].size > 64) {
++		/* RedMagic v182: the command-stream dumps only with boot-arg rmgpudump=1 (v181: 32000 lines filled the 4 MB log) */
++		static int ibdump = -1;
++		if (ibdump < 0) {
++			ibdump = 0;
++			PE_parse_boot_argn("rmgpudump", &ibdump, sizeof(ibdump));
++		}
++		if (ibdump && fNested < 4 && cmds[i].size > 64) {
 +			uint32_t words[8];
 +			uint32_t at = 0;
 +
@@ -126233,7 +129639,7 @@ index 000000000..949b11995
 +				}
 +			}
 +		}
-+		if (cmds[i].size > 64 && fDumped < 3) {
++		if (ibdump && cmds[i].size > 64 && fDumped < 3) {
 +			/* The whole first driver-sized stream, eight words a
 +			 * line, so tools/pm4-decode.py can name every packet. */
 +			uint32_t words[8];
@@ -126315,14 +129721,19 @@ index 000000000..949b11995
 +				IOSimpleLockFree(l);
 +			}
 +		}
++		/* v198: surfaces only (who else is asked for?), from the memory retained above */
 +		for (i = 0; i < request->nr_bos; i++) {
-+			mondrian_buffer *bo = bufferForType(bos[i].handle);
-+
-+			if (bo != NULL) {
-+				mondrian_mem_fence_note(bo->memory, fence);
++			if (refs[i].memory != NULL && refs[i].surface) {
++				mondrian_mem_fence_note(refs[i].memory, fence);
 +			}
 +		}
 +	}
++	for (i = 0; i < request->nr_bos; i++) {
++		if (refs[i].memory != NULL) {
++			refs[i].memory->release();
++		}
++	}
++	IOFree(refs, refsSize);
 +	return result;
 +}
 +
@@ -126600,6 +130011,12 @@ index 000000000..949b11995
 +		    kMondrianPatienceMs) == 0 ? kIOReturnSuccess :
 +		    kIOReturnTimeout;
 +		absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
++		if (gRetiredHead != NULL) {
++			/* v198: the GPU is past something: what was closed behind it goes now */
++			IOLockLock(fLock);
++			(void)reapRetired();
++			IOLockUnlock(fLock);
++		}
 +		if (ns > 50000000ull && slowLogged < 40) {
 +			slowLogged++;
 +			printf("MondrianGPU: wait fence %u took %llu ms -> 0x%x\n",
@@ -126961,24 +130378,33 @@ index 000000000..949b11995
 +		 * With IOKit's default locking this wait happened by accident,
 +		 * behind the plug-in's WAIT_FENCE.
 +		 */
++		/* v198: no wait: the buffer is freed once the GPU is past it (bufferRetire), unless too many are held so */
 +		{
-+			uint32_t last = mondrian_gpu_uc_last_fence();
-+			if (last != 0) {
-+				(void)mondrian_gpu_uc_wait(last, 500);
-+			}
-+		}
-+		IOLockLock(fLock);
-+		{
-+			mondrian_buffer *buffer =
-+			    bufferForType(request.close.handle);
++			uint32_t waitFor = 0;
 +
-+			if (buffer == NULL) {
-+				result = kIOReturnBadArgument;
-+			} else {
-+				bufferFree(buffer);
++			IOLockLock(fLock);
++			{
++				mondrian_buffer *buffer =
++				    bufferForType(request.close.handle);
++
++				if (buffer == NULL) {
++					result = kIOReturnBadArgument;
++				} else {
++					bufferRetire(buffer);
++				}
++			}
++			(void)reapRetired();
++			if (gRetiredHead != NULL && (gRetiredCount > kMondrianRetiredMax || gRetiredBytes > kMondrianRetiredBytes)) {
++				waitFor = gRetiredHead->freeFence;
++			}
++			IOLockUnlock(fLock);
++			if (waitFor != 0) {
++				(void)mondrian_gpu_uc_wait(waitFor, 500);
++				IOLockLock(fLock);
++				(void)reapRetired();
++				IOLockUnlock(fLock);
 +			}
 +		}
-+		IOLockUnlock(fLock);
 +		break;
 +	default:
 +		IOLog("MondrianGPU: request %#x (%zu bytes) is not known\n",
@@ -149181,10 +152607,10 @@ index 000000000..56a9af7f6
 +
 diff --git a/iokit/Kernel/arm/hid/MondrianHID.cpp b/iokit/Kernel/arm/hid/MondrianHID.cpp
 new file mode 100644
-index 000000000..f1fc858f1
+index 000000000..44c50f2fd
 --- /dev/null
 +++ b/iokit/Kernel/arm/hid/MondrianHID.cpp
-@@ -0,0 +1,558 @@
+@@ -0,0 +1,572 @@
 +/*
 + * MONDRIAN: HID event services for the iOS userland (backboardd's HID event
 + * system).
@@ -149548,6 +152974,13 @@ index 000000000..f1fc858f1
 +	IOLock *fLock;
 +	bool fDown[MONDRIAN_TOUCH_FINGERS];
 +	bool fEdge[MONDRIAN_TOUCH_FINGERS];     /* landed on a screen edge: UIKit edge gestures need it */
++	/*
++	 * RedMagic v201: each contact's own identity (path id), new at every touch-down, as Apple's touch controller
++	 * gives them. The slot's fixed i + 2 made a touch that came soon after the last one on the same slot look like
++	 * that one (the user: a quick swipe after a tap or swipe "becomes a tap"; slow ones were fine).
++	 */
++	UInt32 fIdent[MONDRIAN_TOUCH_FINGERS];
++	UInt32 fNextIdent;
 +	IOFixed fX[MONDRIAN_TOUCH_FINGERS];
 +	IOFixed fY[MONDRIAN_TOUCH_FINGERS];
 +};
@@ -149650,6 +153083,12 @@ index 000000000..f1fc858f1
 +	 * 34 points of the bottom (the home bar strip), on an 812-point-tall screen, is an edge finger.
 +	 */
 +	if (!was && down) {
++		if (fNextIdent < 2 || fNextIdent > 0xfff0) {
++			fNextIdent = 2;
++		}
++		fIdent[finger] = fNextIdent++;
++	}
++	if (!was && down) {
 +		const IOFixed side = (IOFixed)((16LL << 16) / 375), top = (IOFixed)((16LL << 16) / 812),
 +		    bottom = (IOFixed)((34LL << 16) / 812);
 +		fEdge[finger] = nx < side || nx > (1 << 16) - side || ny < top || ny > (1 << 16) - bottom;
@@ -149670,7 +153109,8 @@ index 000000000..f1fc858f1
 +		}
 +		IOFixed fx = (i == finger && down) ? nx : fX[i];
 +		IOFixed fy = (i == finger && down) ? ny : fY[i];
-+		IOHIDEvent *child = IOHIDEvent::digitizerEvent(now, (UInt32)i + 2, kIOHIDDigitizerTransducerTypeFinger,
++		const UInt32 ident = fIdent[i] >= 2 ? fIdent[i] : (UInt32)i + 2;
++		IOHIDEvent *child = IOHIDEvent::digitizerEvent(now, ident, kIOHIDDigitizerTransducerTypeFinger,
 +		    d, d ? 1 : 0, fx, fy);
 +		if (!child) {
 +			continue;
@@ -149691,7 +153131,7 @@ index 000000000..f1fc858f1
 +			mask |= 0x800;          /* kIOHIDDigitizerEventFromEdgeTip: not a change, a property */
 +		}
 +		child->setIntegerValue(kIOHIDEventFieldDigitizerIndex, i);
-+		child->setIntegerValue(kIOHIDEventFieldDigitizerIdentity, i + 2);
++		child->setIntegerValue(kIOHIDEventFieldDigitizerIdentity, ident);
 +		child->setIntegerValue(kIOHIDEventFieldDigitizerTouch, d);
 +		child->setIntegerValue(kIOHIDEventFieldDigitizerEventMask, mask);
 +		child->setIntegerValue((IOHIDEventField)0xb0019, 1);   /* DigitizerDisplayIntegrated */
@@ -170648,6 +174088,29 @@ index e26a1d70f..536551c8f 100644
  
  
  #if HIBERNATION
+diff --git a/osfmk/arm/io_map.c b/osfmk/arm/io_map.c
+index 18ef2f021..fb60db0f4 100644
+--- a/osfmk/arm/io_map.c
++++ b/osfmk/arm/io_map.c
+@@ -62,7 +62,18 @@
+ 
+ extern vm_offset_t virtual_space_start;     /* Next available kernel VA */
+ 
++/*
++ * RedMagic v198: 64 MB (was 8). ml_io_map takes its addresses here for good, KMA_NOFAIL: a mapping that does not fit
++ * never returns. That was v149/v150's dead boots (ring166: the map ended 0x60000 past Wi-Fi's second region and the
++ * third was 0x80000), read then as "never map 1 MB" -- and by ring214 the drivers' mappings reached within ~300 KB
++ * of the end. Addresses only; nothing is wired for it.
++ */
++#include <pexpert/arm64/board_config.h>
++#if defined(MONDRIAN)
++#define IO_MAP_SIZE            (64ul << 20)
++#else
+ #define IO_MAP_SIZE            (8ul << 20)
++#endif
+ 
+ __startup_data static struct mach_vm_range io_range;
+ static SECURITY_READ_ONLY_LATE(vm_map_t) io_submap;
 diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
 index fc2096fa0..2cce4b31e 100644
 --- a/osfmk/arm/pmap/pmap.c
@@ -171765,7 +175228,7 @@ index 133b07fd6..901879cec 100644
  
  /* I-Cache. */
 diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
-index c40c6eac4..53168acea 100644
+index c40c6eac4..6cb04ba1d 100644
 --- a/osfmk/arm64/sleh.c
 +++ b/osfmk/arm64/sleh.c
 @@ -32,11 +32,13 @@
@@ -171814,7 +175277,7 @@ index c40c6eac4..53168acea 100644
  	}
  
  	panic_with_thread_kernel_state("Kernel data abort.", state);
-@@ -1846,6 +1873,74 @@ handle_simd_trap(arm_saved_state_t *state, uint32_t esr)
+@@ -1846,6 +1873,164 @@ handle_simd_trap(arm_saved_state_t *state, uint32_t esr)
  	__builtin_unreachable();
  }
  
@@ -171876,6 +175339,96 @@ index c40c6eac4..53168acea 100644
 +#endif
 +}
 +
++/*
++ * RedMagic v200: where the CPUs are when their timer interrupt comes, kernel PCs counted per CPU (256 open-addressed
++ * slots each, collisions dropped), user time counted apart. kernel_task held ~1.7 cores all the time in ring217
++ * (CPUTOP) and its threads are not named: mondrian_prof_report() prints, for cpu4-7 together, the user share and the
++ * ten hottest kernel PCs (symbolised on the Mac against the unstripped kernel), then starts over.
++ */
++#if defined(MONDRIAN)
++#define MONDRIAN_PROF_SLOTS 256
++static struct {
++	uint64_t pc;
++	uint32_t n;
++} mondrian_prof[8][MONDRIAN_PROF_SLOTS];
++static uint32_t mondrian_prof_user[8], mondrian_prof_all[8], mondrian_prof_lost[8];
++
++static void
++mondrian_prof_note(unsigned cpu, uint64_t pc)
++{
++	if (cpu >= 8) {
++		return;
++	}
++	mondrian_prof_all[cpu]++;
++	if ((pc >> 63) == 0) {
++		mondrian_prof_user[cpu]++;
++		return;
++	}
++	unsigned h = (unsigned)(((pc >> 2) * 2654435761ull) >> 24) % MONDRIAN_PROF_SLOTS;
++	for (unsigned k = 0; k < 8; k++, h = (h + 1) % MONDRIAN_PROF_SLOTS) {
++		if (mondrian_prof[cpu][h].pc == pc) {
++			mondrian_prof[cpu][h].n++;
++			return;
++		}
++		if (mondrian_prof[cpu][h].pc == 0) {
++			mondrian_prof[cpu][h].pc = pc;
++			mondrian_prof[cpu][h].n = 1;
++			return;
++		}
++	}
++	mondrian_prof_lost[cpu]++;
++}
++#endif
++
++void mondrian_prof_report(void);
++void
++mondrian_prof_report(void)
++{
++#if defined(MONDRIAN)
++	uint64_t top_pc[10] = { 0 };
++	uint32_t top_n[10] = { 0 }, user = 0, all = 0, lost = 0;
++
++	for (unsigned cpu = 4; cpu < 8; cpu++) {
++		user += mondrian_prof_user[cpu];
++		all += mondrian_prof_all[cpu];
++		lost += mondrian_prof_lost[cpu];
++		for (unsigned s = 0; s < MONDRIAN_PROF_SLOTS; s++) {
++			const uint64_t pc = mondrian_prof[cpu][s].pc;
++			const uint32_t n = mondrian_prof[cpu][s].n;
++			if (pc == 0) continue;
++			/* the same PC on several CPUs adds up */
++			unsigned at = 10;
++			for (unsigned t = 0; t < 10; t++) {
++				if (top_pc[t] == pc) { at = t; break; }
++			}
++			uint32_t total = n + (at < 10 ? top_n[at] : 0);
++			if (at < 10) {
++				for (unsigned t = at; t + 1 < 10; t++) { top_pc[t] = top_pc[t + 1]; top_n[t] = top_n[t + 1]; }
++				top_pc[9] = 0; top_n[9] = 0;
++			}
++			for (unsigned t = 0; t < 10; t++) {
++				if (total > top_n[t]) {
++					for (unsigned m = 9; m > t; m--) { top_pc[m] = top_pc[m - 1]; top_n[m] = top_n[m - 1]; }
++					top_pc[t] = pc; top_n[t] = total;
++					break;
++				}
++			}
++		}
++		bzero(mondrian_prof[cpu], sizeof(mondrian_prof[cpu]));
++		mondrian_prof_user[cpu] = mondrian_prof_all[cpu] = mondrian_prof_lost[cpu] = 0;
++	}
++	if (all == 0) {
++		return;
++	}
++	printf("KPROF cpu4-7: %u timer samples, %u%% user, %u%% kernel (%u not counted); hottest kernel PCs:", all,
++	    user * 100 / all, (all - user) * 100 / all, lost);
++	for (unsigned t = 0; t < 10 && top_n[t] != 0; t++) {
++		printf(" %llx:%u%%", (unsigned long long)top_pc[t], top_n[t] * 100 / all);
++	}
++	printf("\n");
++#endif
++}
++
 +uint64_t
 +mondrian_timer_last_pc(void)
 +{
@@ -171889,7 +175442,7 @@ index c40c6eac4..53168acea 100644
  void
  sleh_irq(arm_saved_state_t *state)
  {
-@@ -1855,6 +1950,54 @@ sleh_irq(arm_saved_state_t *state)
+@@ -1855,6 +2040,55 @@ sleh_irq(arm_saved_state_t *state)
  #endif
  
  
@@ -171917,6 +175470,7 @@ index c40c6eac4..53168acea 100644
 +		 * was; if it stops, the CPU is stuck.
 +		 */
 +		mondrian_last_irq_pc = get_saved_state_pc(state);
++		mondrian_prof_note(cdp->cpu_number, mondrian_last_irq_pc);     /* v200 */
 +		if ((++mondrian_irq_count & 0x3) == 0) {
 +			mondrian_fbcon_beacon(get_saved_state_pc(state), mondrian_irq_count);
 +		}
@@ -171944,7 +175498,7 @@ index c40c6eac4..53168acea 100644
  	sleh_interrupt_handler_prologue(state, DBG_INTR_TYPE_OTHER);
  
  #if USE_APPLEARMSMP
-@@ -1866,6 +2009,7 @@ sleh_irq(arm_saved_state_t *state)
+@@ -1866,6 +2100,7 @@ sleh_irq(arm_saved_state_t *state)
  	    cdp->interrupt_nub,
  	    cdp->interrupt_source);
  #endif
@@ -172551,6 +176105,72 @@ index 809dafaaa..cd2b133e3 100644
  kern_return_t
  bsd_exception(
  	exception_type_t        exception,
+diff --git a/osfmk/kern/sched_prim.c b/osfmk/kern/sched_prim.c
+index 8e2958646..b5f34c739 100644
+--- a/osfmk/kern/sched_prim.c
++++ b/osfmk/kern/sched_prim.c
+@@ -65,6 +65,7 @@
+  */
+ 
+ #include <debug.h>
++#include <pexpert/arm64/board_config.h>     /* RedMagic v184: MONDRIAN below */
+ 
+ #include <mach/mach_types.h>
+ #include <mach/machine.h>
+@@ -5078,6 +5079,20 @@ choose_processor(
+ 				processor = PROCESSOR_NULL;
+ 				break;
+ 			case PROCESSOR_IDLE:
++#if defined(MONDRIAN)
++				/*
++				 * RedMagic v188: a thread's last CPU, idle, came back here before the v184 search for the
++				 * highest idle core ever ran, so a thread that once ran on a little core (cpu0-3, Cortex-A510)
++				 * kept going back to it: half of backboardd's draw calls ran there at 130-470 us each, against
++				 * 30-70 us on cpu4-7 (ring203), and 35-40 % of its frames committed a frame late. A little
++				 * core's hint now gives way to any idle big core.
++				 */
++				if (processor->cpu_id < 4 &&
++				    (pset->cpu_state_map[PROCESSOR_IDLE] & pset->recommended_bitmask & 0xf0ull) != 0) {
++					processor = PROCESSOR_NULL;
++					break;
++				}
++#endif
+ 				/*
+ 				 * Hint is for an idle processor. Assume it is no worse than any other
+ 				 * idle processor. The platform layer had an opportunity to provide
+@@ -5246,7 +5261,16 @@ no_available_cpus:
+ 		/* there shouldn't be a pending AST if the processor is idle */
+ 		assert((idle_primary_map & pset->pending_AST_URGENT_cpu_mask) == 0);
+ 
++#if defined(MONDRIAN)
++		/*
++		 * RedMagic v184: the highest-numbered idle CPU, not the lowest. On the SM8450 cpu0-3 are the in-order
++		 * Cortex-A510s, cpu4-6 A710s, cpu7 the X2; the lowest first put every waking thread on a little core while
++		 * the big ones idled (backboardd's draw calls: ~120 us each on cpu0-3, 22-31 us on cpu4-7).
++		 */
++		int cpuid = bit_first(idle_primary_map);
++#else
+ 		int cpuid = lsb_first(idle_primary_map);
++#endif
+ 		if (cpuid >= 0) {
+ 			processor = processor_array[cpuid];
+ 			return processor;
+@@ -8304,6 +8328,15 @@ try_again:
+ 	}
+ 
+ 	cpumap_t primary_map = cpu_map & pset->primary_map;
++#if defined(MONDRIAN)
++	/* RedMagic v184: realtime threads (CoreAnimation's, audio) to the fastest free core too, the highest number */
++	{
++		int fastest = bit_first(primary_map);
++		if (fastest >= 0) {
++			return processor_array[fastest];
++		}
++	}
++#endif
+ 	if (avoid_cpu0) {
+ 		primary_map = bit_ror64(primary_map, 1);
+ 	}
 diff --git a/osfmk/kern/startup.c b/osfmk/kern/startup.c
 index bec97fbf7..b65acc224 100644
 --- a/osfmk/kern/startup.c

@@ -171,3 +171,76 @@ Each phase ends in one flash with a pass/fail line in the log ring, as the GPU p
 - Phases 3–4: a similar amount again.
 - Phase 5 (IPA data): the bulk, open-ended; redfin is still fighting crashes and stalls there on an older, better
   documented IPA.
+
+## Update 2026-11-14 (after Wi-Fi works)
+
+Wi-Fi now works end to end (v178: QCA6490 over PCIe/MHI, ath11k, wifid, Settings joins WPA2, ~118 Mb/s). That
+work built most of the modem's plumbing, so the starting point is better than this note assumed on 11-12.
+
+**Already in our kernel (`ref/redmagic/xnu-rm/bsd/dev/rmwifi/hakios.wifi.c`, HackiOS's WPSS path, unused on
+this phone):**
+
+| Piece | Lines | Change for the modem |
+|---|---|---|
+| SMEM | 450–665 | host 13 → 1; map page by page (its 2 MiB `ml_io_map_unmappable` fails here) |
+| SMP2P | 646–720 | IPCC client 24 → 2, items 435/428 |
+| AOSS QMP | 818–914 | already used for the Wi-Fi iPA rail (`mondrian_qmp_send`) |
+| `scm()` SMC wrapper: PAS init, mem_setup, auth_and_reset, shutdown | 1722–1778 | PAS id 6 → 4 |
+| MDT image header, segment load, start | 1817–2230 | |
+| GLINK over SMEM | 2272–2800 | edge to MPSS |
+| QRTR | 2805–3100 | name service, `hakios_qrtr_ops` |
+| Generic QMI | `hakios.qmi.c` | |
+
+SiP SMC calls from EL1 already work on this board (GPU zap shader, Wi-Fi).
+
+**References:**
+- **HackiOS** has `drivers/modem/{hakios.mpss.c,qmi.c,nas.c,ipa.c,cell.c}`. Our clone is partial and those files
+  are not on disk; `git checkout HEAD -- drivers/modem` would fetch them.
+  - Its README's "cellular partly" is the POCO X5 Pro (SM7325), not the Mi 10.
+  - From its headers and commits: PAS id 4; RMTFS, TFTP and servreg servers; QRTR name service; QMI DMS, UIM, NAS,
+    WDS, WDA and DPM.
+  - Data path: an in-kernel IPA 4.11 path and a fake `en1`.
+  - iOS side: no CommCenter; a UIKit hook draws the bars and the operator name from the kernel's NAS state.
+- **iOSPlus10** (OnePlus 10 Pro, the same SM8450): `patches/xnu/0397-negroni-gnss.patch` boots the modem from XNU.
+  - PAS 4, carveout 0x8bc00000 + 0x13200000 (ours matches: `mpss_region@8bc00000` size 0x13200000).
+  - SMP2P items 435/428 on IPCC client 2; GLINK `IPCRTR` on SMEM items 478/479.
+  - RMTFS, TFTP and servreg ported from HackiOS.
+  - It is untested on hardware.
+
+**Phone facts (Android, 2026-11-14, `recon/modem-bt-ref/`):**
+- `remoteproc-mss@04080000`, `qcom,waipio-modem-pas`; interrupts wdog, fatal, handover, ready, stop-ack and
+  shutdown-ack; has a `glink-edge`.
+- Firmware `/vendor/firmware_mnt/image/modem.mdt` + `modem.b00..b31`.
+- Partitions:
+  - `modemst1` = sdf2, `modemst2` = sdf3, `fsg` = sdf4, `fsc` = sdf5;
+  - `modem_a` = sde6, `modem_b` = sde34.
+- Daemons: `qrtr-ns`, `pd-mapper`, `rmt_storage`, `tftp_server`.
+- Baseband `NX679J_Z69_UN_ZML1T_V612`. **SIM state: ABSENT**. A SIM must be in the phone before phases 3–4.
+
+**SM8450 needs beyond HackiOS:**
+- PAS_IS_SUPPORTED (2/7).
+- A hypervisor memory assign of the RMTFS buffer (HLOS + MSS_MSA, below 4 GiB).
+- Repeated shutdown polling (`decrypt_shutdown`).
+- About 107 MiB of firmware, from UFS or the kernel blob.
+- TFTP for `modem_pr`; dual-SIM UIM.
+- A new IPA port: hw-ver 0x16, which is probably IPA v5.x, not the 4.11 HackiOS has.
+
+**Diagnostics in v180 (read-only):** `RM MODEM:` lines.
+- SMEM's version word, the table of partitions (the modem is host 1), and the global partition's items.
+- Item 469, the image version table, as text.
+
+**Next probe:** SCM PAS_IS_SUPPORTED(4), and the SMEM 0↔1 partition (item 435 should be absent while the modem is
+cold; also items 478/479). That shows whether TrustZone will take a modem image from our EL1.
+
+Extra notes, from the original session's own scope scan (2026-11-14):
+- **SCM:** `mondrian_gpu.c:2111` (`mondrian_scm`) already makes SCM calls on this phone, including PAS calls.
+- **Probe order:**
+  1. read-only `PAS_IS_SUPPORTED(4)`;
+  2. look in SMEM for item 435 and GLINK items 478–480;
+  3. then `MP_ASSIGN` (0xc, 0x16) a test RMTFS buffer to HLOS + MSS (+ NAV, VMID 0x2b) and back.
+
+  The unknown is whether Gunyah accepts the assign (iOSPlus10 `README-gnss.md:175-180`).
+- **HackiOS on SM7325:** the modem crashed in `enl2_dl` after DMS ONLINE until IPA ran. RMTFS was served from RAM.
+  Sources: `ref/iOSPlus10/docs/location-plan.md:165-182` and `references-2026-10-27.md:111-118`.
+- **`recon/live.dts`:** mpss_region :166, remoteproc-mss :6130, rmtfs 0x280000 :9703, IPA :13012, smp2p-modem
+  :14697.

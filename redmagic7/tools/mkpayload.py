@@ -182,6 +182,21 @@ def add_wlan_node_to_adt(adt_blob):
     return adt.serialize(root)
 
 
+def single_cluster_adt(adt_blob):
+    """Return the ADT with every /cpus/* cluster-id 0: XNU then puts all 8 cores in one processor set (on this SMP
+    kernel each cluster-id is its own pset, and a thread stays in its cluster while that has an idle core)."""
+    root, _ = adt.parse(adt_blob)
+    cpus = next(c for c in root.children if c.name == 'cpus')
+    n = 0
+    for cpu in cpus.children:
+        for i, (name, flags, value) in enumerate(cpu.props):
+            if name == 'cluster-id':
+                cpu.props[i] = (name, flags, struct.pack('<I', 0))
+                n += 1
+    print(f'single cluster: cluster-id 0 on {n} cpus')
+    return adt.serialize(root)
+
+
 def adt_dram(adt_blob):
     """Kernel-managed RAM <base, size> from the ADT's /chosen dram-base/dram-size."""
     root, _ = adt.parse(adt_blob)
@@ -191,7 +206,7 @@ def adt_dram(adt_blob):
 
 
 def build(kernel_path, adt_path, cmdline, ramdisk_path=None, board=None, rtc_offset=None, timezone=None, chosen_u32=(),
-          chosen_str=(), wlan=False):
+          chosen_str=(), wlan=False, single_cluster=False):
     buf = bytearray(open(kernel_path, 'rb').read())
     m = parse_macho(buf)
     nfix = apply_chained_fixups(buf, m)
@@ -219,6 +234,8 @@ def build(kernel_path, adt_path, cmdline, ramdisk_path=None, board=None, rtc_off
         adt_blob = add_chosen_str_to_adt(adt_blob, name, value)
     if wlan:
         adt_blob = add_wlan_node_to_adt(adt_blob)
+    if single_cluster:
+        adt_blob = single_cluster_adt(adt_blob)
     # The ADT decides where the kernel's RAM is (mkadt.py --highmem).
     PHYS_BASE, MEM_SIZE = adt_dram(adt_blob)
     pieces = [(s['vmaddr'], s['vmsize'], buf[s['fileoff']:s['fileoff'] + s['filesize']]) for s in segs]
@@ -272,6 +289,7 @@ if __name__ == '__main__':
     ap.add_argument('--chosen-str', action='append', default=[], metavar='NAME=VALUE',
                     help='a /chosen string property (e.g. mondrian-wifi-mac=aa:bb:cc:dd:ee:ff)')
     ap.add_argument('--wlan', action='store_true', help='add /arm-io/wlan so launchd starts wifid')
+    ap.add_argument('--single-cluster', action='store_true', help='every cpu cluster-id 0: one processor set')
     ap.add_argument('--facts', help='shim dtb dump to take the memory map from')
     ap.add_argument('--allow-provisional', action='store_true',
                     help='build even if the board still has guessed values')
@@ -282,7 +300,8 @@ if __name__ == '__main__':
     if not a.allow_provisional:
         boards.require_measured(board, 'mkpayload.py')
     cmdline = a.cmdline if a.cmdline is not None else board.cmdline
-    blob, info = build(a.kernel, a.adt, cmdline, a.ramdisk, board, a.rtc_offset, a.timezone, a.chosen_u32, a.chosen_str, a.wlan)
+    blob, info = build(a.kernel, a.adt, cmdline, a.ramdisk, board, a.rtc_offset, a.timezone, a.chosen_u32, a.chosen_str, a.wlan,
+                       a.single_cluster)
     if a.chosen_u32:
         info['chosen_u32'] = a.chosen_u32
     if a.timezone:

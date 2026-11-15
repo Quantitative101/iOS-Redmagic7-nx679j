@@ -12,12 +12,15 @@ Apple's `xnu-8796.141.3`, the boot shim, the payload and device-tree tools, the
 Wi-Fi driver glue and the GPU/userland helpers. No iOS, IPSW, Apple binaries or
 phone firmware are included (see [Legal](#legal)).
 
-## Status (initial import)
+## Status (2026-11-15)
 
 | Part | State |
 |---|---|
 | Boot to lock screen and home screen, stock apps | yes (some apps still do not draw) |
-| Touch, power and volume keys, display brightness | yes |
+| Touch, power and volume keys, display brightness | yes (fast successive swipes no longer dropped) |
+| Display at 90 Hz | yes: panel at 90 Hz, iOS animates at the panel's measured ~90.6 Hz |
+| Fan (Nubia I2C fan) | yes |
+| CPU: big cores first, load-based clocks, thermal throttle from 80 °C | yes |
 | GPU (Adreno 730) rendering for CoreAnimation | yes, via the HakiosMetal plug-in |
 | Battery level and charger, RTC and time zone | yes |
 | Settings (incl. General > About, Date & Time) | yes |
@@ -25,7 +28,9 @@ phone firmware are included (see [Legal](#legal)).
 | Wi-Fi signal bars | wrong (fix in progress) |
 | Bluetooth | no (scoped: QCA6490 over GENI UART) |
 | Cellular | no (scoped: MPSS PAS, QRTR/QMI, IPA) |
-| Some apps (Notes, Maps, Wallet, ...) | do not render yet |
+| Notes, Podcasts | yes (fixed since the first import) |
+| Maps, Compass, News, Wallet, Phone, FaceTime, Measure, Magnifier | do not open yet (FairPlay, camera and modem services missing) |
+| Camera | no (scoped) |
 
 The Wi-Fi bring-up path, for the record: QCA6490 power-up (RPMh rails, AOP
 iPA vote, the eGPIO-backed XO clock pin) → PCIe Gen2 link → MHI/BHI(e)
